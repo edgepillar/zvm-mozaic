@@ -203,6 +203,7 @@ try {
   const browserVersion = await browser.version()
   for (const name of ['old-head', 'old-totals', 'late-router', 'unavailable', 'old-chunk', 'old-history', 'old-log-error', 'canvas-switch', 'draft-context', 'draft-fast-return', 'draft-storage-reload', 'legacy-storage-migration']) {
     active = {name, held: new Map(), calls: [], contractCalls: []}; const state = active
+    console.log('MOZAIC-BOARD-BROWSER-START ' + JSON.stringify({case: name, source}))
     const context = await browser.createBrowserContext(), page = await context.newPage()
     page.setDefaultTimeout(20_000); await page.setViewport({width: 1440, height: 1000})
     page.on('pageerror', error => errors.push(String(error)))
@@ -259,7 +260,13 @@ try {
         await page.click('[data-testid="node-picker"]'); await page.waitForSelector('#contract', {visible: true})
         await page.$eval('#contract', (input, value) => {input.value = value; input.dispatchEvent(new Event('input', {bubbles: true})); input.closest('form').requestSubmit()}, B)
       } else await changeNode(page, origin + '/node/b/rpc')
-      await waitStats(page, 7, 8); await quiet(page)
+      await waitStats(page, 7, 8)
+      // The obsolete HTTP reply is intentionally pending. Observe the current
+      // rendered pixel instead of waiting for that held request to become idle.
+      await page.waitForFunction(() => {
+        const data = document.querySelector('[data-testid="board"]').getContext('2d').getImageData(4, 4, 1, 1).data
+        return data[0] === 68 && data[1] === 102 && data[2] === 136
+      }, {timeout: 20_000})
       const before = await canvasColour(page); assert.deepEqual(before, [68, 102, 136])
       state.held.get('chunk').release(); await quiet(page)
       const after = await canvasColour(page); assert.deepEqual(after, before)
@@ -269,7 +276,8 @@ try {
         currentSnapshotChunks: chunks, actualNodeOrCanvasPickerUsed: true, observedStats: await stats(page), pass: true})
     } else if (name === 'old-history' || name === 'old-log-error') {
       await until(() => state.held.has('history'), 'The original A history request must actually be held')
-      await changeNode(page, origin + '/node/b/rpc'); await waitStats(page, 7, 8); await quiet(page)
+      await changeNode(page, origin + '/node/b/rpc'); await waitStats(page, 7, 8)
+      // Current history can render while the old HTTP request remains held.
       await page.waitForFunction(() => document.querySelector('.stats-body')?.textContent.includes('0x5555'))
       const before = state.calls.filter(row => row.method === 'eth_getLogs').map(row => row.node)
       state.held.get('history').release(name === 'old-log-error' ? {fixtureError: 'controlled obsolete range refusal'} : [canvasPaint])
@@ -329,6 +337,12 @@ try {
     actualProductionEntryRoutes: ['canvas', 'gallery'], actualDraftPixelsPreserved: 1, actualIndexedDBAndLegacyStorage: true, nativeStorageLockCases: 3, actualDraftReloadCases: 1,
     servedBuildFiles: Object.fromEntries(Array.from(delivered).sort()), unexpectedExternalRequests: 0, pageOrFixtureErrors: 0,
     walletProvidersConnected: 0, publicNetworkOrRealNoMExecution: false, sourceTestHooksOrProductModuleReplacements: 0}))
+} catch (error) {
+  console.log('MOZAIC-BOARD-BROWSER-FAILURE ' + JSON.stringify({case: active?.name, source,
+    errorType: error.name, message: String(error.message).slice(0, 240),
+    heldReplies: Array.from(active?.held ?? [], ([name, row]) => ({name, released: row.released === true})),
+    RPCRequests: active?.calls.length, contractRequests: active?.contractCalls.length}))
+  throw error
 } finally {
   for (const row of active?.held.values() ?? []) if (!row.released) row.release()
   await browser?.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve))
