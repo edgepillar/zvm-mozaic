@@ -190,15 +190,17 @@ function resolveContract(chainId: number): Pick<EndpointState, 'contract' | 'con
 
 /** Points the app at a different node and re-checks it. */
 export async function setEndpoint(input: string): Promise<boolean> {
-  const url = normalize(input)
+  const url = normalize(input), generation = ++selectionGeneration
+  checking = null
+  const current = () => selectionGeneration === generation
   if (!url) {
-    endpoint.error = 'That is not a URL.'
-    endpoint.hint = `Try ${DEFAULT_RPC}`
-    endpoint.health = 'error'
+    fail('That is not a URL.', `Try ${DEFAULT_RPC}`, current)
     return false
   }
   endpoint.rpc = url
+  if (!current() || endpoint.rpc !== url) return false
   save(KEY, url)
+  if (!current() || endpoint.rpc !== url) return false
   return check()
 }
 
@@ -209,6 +211,11 @@ export async function setEndpoint(input: string): Promise<boolean> {
 export async function setContract(input: string): Promise<boolean> {
   const chainId = endpoint.chainId
   if (chainId === null) return false
+  const rpc = endpoint.rpc, generation = selectionGeneration, selected = ++contractGeneration
+  canvasReading = null
+  const current = () => selectionGeneration === generation && contractGeneration === selected &&
+    endpoint.rpc === rpc && endpoint.chainId === chainId
+  if (!clearCanvas(current)) return false
   const s = input.trim()
   if (s && !isAddress(s)) {
     endpoint.contractError = 'That is not a contract address: 0x and 40 hex characters.'
@@ -216,8 +223,12 @@ export async function setContract(input: string): Promise<boolean> {
   }
   linkContract = null
   save(CONTRACT_KEY(chainId), s || null)
-  Object.assign(endpoint, resolveContract(chainId))
-  return checkContract()
+  if (!current()) return false
+  for (const [key, value] of Object.entries(resolveContract(chainId))) {
+    if (!current()) return false
+    Object.assign(endpoint, {[key]: value})
+  }
+  return current() ? checkContract() : false
 }
 
 class HttpError extends Error {
@@ -252,26 +263,48 @@ async function isZvmNode(apiBase: string): Promise<boolean> {
   }
 }
 
-let checking: Promise<boolean> | null = null
+let selectionGeneration = 0
+let contractGeneration = 0
+let checking: {url: string; generation: number; promise: Promise<boolean>} | null = null
+let canvasReading: {current: () => boolean; promise: Promise<boolean>} | null = null
 
 export function check(): Promise<boolean> {
-  if (checking) return checking
-  checking = run().finally(() => {
-    checking = null
+  const url = endpoint.rpc, generation = selectionGeneration
+  if (checking?.url === url && checking.generation === generation) return checking.promise
+  let selectedURL = url
+  const current = () => selectionGeneration === generation && endpoint.rpc === selectedURL
+  let accept!: (value: boolean) => void
+  let decline!: (reason: unknown) => void
+  const completed = new Promise<boolean>((resolve, reject) => {accept = resolve; decline = reject})
+  const promise = completed.finally(() => {
+    if (checking?.promise === promise) checking = null
   })
-  return checking
+  // Register ownership before fetch or a reactive observer can reenter.
+  checking = {url, generation, promise}
+  const selectRPC = (candidate: string) => {
+    if (!current()) return false
+    selectedURL = candidate
+    if (checking?.promise === promise) checking.url = candidate
+    endpoint.rpc = candidate
+    return current()
+  }
+  void run(url, current, selectRPC).then(accept, decline)
+  return promise
 }
 
-async function run(): Promise<boolean> {
-  const url = endpoint.rpc
+async function run(url: string, current: () => boolean, selectRPC: (candidate: string) => boolean): Promise<boolean> {
   endpoint.health = 'checking'
+  if (!current() || !clearChain(current)) return false
   endpoint.error = null
+  if (!current()) return false
   endpoint.hint = null
+  if (!current()) return false
 
   if (mixedContentBlocked(url)) {
     fail(
       `This page is served over HTTPS and cannot reach ${hostOf(url)} over plain HTTP.`,
       'Use an HTTPS address, or http://localhost, which browsers allow from an HTTPS page.',
+      current,
     )
     return false
   }
@@ -283,21 +316,37 @@ async function run(): Promise<boolean> {
   for (const candidate of candidates) {
     try {
       const chainId = await chainIdOf(candidate, 8000)
-      const apiBase = /\/rpc$/.test(candidate) ? candidate.replace(/\/rpc$/, '') : null
-      endpoint.rpc = candidate
+      if (!current()) return false
+      const base = /\/rpc$/.test(candidate) ? candidate.replace(/\/rpc$/, '') : null
+      const apiBase = base && (await isZvmNode(base)) ? base : null
+      if (!current() || !selectRPC(candidate)) return false
       save(KEY, candidate)
+      if (!current()) return false
+      const selectedContract = contractGeneration
       endpoint.chainId = chainId
+      if (!current()) return false
       endpoint.latency = Math.round(performance.now() - started)
-      endpoint.apiBase = apiBase && (await isZvmNode(apiBase)) ? apiBase : null
+      if (!current()) return false
+      endpoint.apiBase = apiBase
+      if (!current()) return false
+      // A synchronous user choice during publication takes precedence.
+      for (const [key, value] of Object.entries(resolveContract(chainId))) {
+        if (!current()) return false
+        if (contractGeneration !== selectedContract) break
+        Object.assign(endpoint, {[key]: value})
+      }
+      if (!current()) return false
       endpoint.health = 'ok'
-      Object.assign(endpoint, resolveContract(chainId))
+      if (!current()) return false
       await checkContract()
-      return true
+      return current()
     } catch (err) {
+      if (!current()) return false
       last = err
     }
   }
-  describe(last, url)
+  if (!current()) return false
+  describe(last, url, current)
   return false
 }
 
@@ -307,14 +356,14 @@ async function run(): Promise<boolean> {
  * the canvas is the recorded one. It is used only if it says it fronts this
  * canvas; otherwise the page paints the canvas directly, in its six-byte form.
  */
-async function routerFor(client: ReturnType<typeof createPublicClient>, canvas: Address): Promise<Address | null> {
+async function routerFor(client: ReturnType<typeof createPublicClient>, canvas: Address, chainId: number): Promise<Address | null> {
   let candidate: string | null = null
   try {
     candidate = new URLSearchParams(location.search).get('router')
   } catch {
     /* no location */
   }
-  const known = endpoint.chainId !== null ? deploymentFor(endpoint.chainId) : null
+  const known = deploymentFor(chainId)
   if (!candidate && known?.router && known.mozaic.toLowerCase() === canvas.toLowerCase()) candidate = known.router
   if (!candidate || !isAddress(candidate)) return null
   try {
@@ -325,39 +374,61 @@ async function routerFor(client: ReturnType<typeof createPublicClient>, canvas: 
   }
 }
 
-export async function checkContract(): Promise<boolean> {
-  endpoint.canvas = null
-  endpoint.router = null
-  endpoint.contractError = null
-  const address = endpoint.contract
-  if (!address || endpoint.chainId === null) {
-    endpoint.contractError = `No Mozaic is recorded for chain ${endpoint.chainId}. Paste a contract address in the node menu.`
+export function checkContract(): Promise<boolean> {
+  if (canvasReading?.current()) return canvasReading.promise
+  const rpc = endpoint.rpc, chainId = endpoint.chainId, address = endpoint.contract
+  const generation = selectionGeneration, selected = contractGeneration
+  const current = () => selectionGeneration === generation && contractGeneration === selected &&
+    endpoint.rpc === rpc && endpoint.chainId === chainId && endpoint.contract === address
+  let accept!: (value: boolean) => void
+  let decline!: (reason: unknown) => void
+  const completed = new Promise<boolean>((resolve, reject) => {accept = resolve; decline = reject})
+  const promise = completed.finally(() => {
+    if (canvasReading?.promise === promise) canvasReading = null
+  })
+  canvasReading = {current, promise}
+  void readCanvas(rpc, chainId, address, current).then(accept, decline)
+  return promise
+}
+
+async function readCanvas(rpc: string, chainId: number | null, address: Address | null, current: () => boolean): Promise<boolean> {
+  if (!clearCanvas(current)) return false
+  if (!address || chainId === null) {
+    endpoint.contractError = `No Mozaic is recorded for chain ${chainId}. Paste a contract address in the node menu.`
     return false
   }
   try {
-    const client = createPublicClient({transport: http(endpoint.rpc, {batch: true})})
-    const read = (functionName: 'WIDTH' | 'HEIGHT' | 'price' | 'owner') => client.readContract({address, abi: MOZAIC_ABI, functionName})
+    const client = createPublicClient({transport: http(rpc, {batch: true})})
+    if (!current()) return false
+    const read = (functionName: 'WIDTH' | 'HEIGHT' | 'price' | 'owner') => {
+      if (!current()) throw new Error('Canvas context changed')
+      return client.readContract({address, abi: MOZAIC_ABI, functionName})
+    }
     const [width, height, price, owner] = await Promise.all([read('WIDTH'), read('HEIGHT'), read('price'), read('owner')])
+    if (!current()) return false
     endpoint.canvas = {width: Number(width), height: Number(height), price: price as bigint, owner: owner as Address}
-    endpoint.router = await routerFor(client, address)
-    return true
+    if (!current()) return false
+    const router = await routerFor(client, address, chainId)
+    if (!current()) return false
+    endpoint.router = router
+    return current()
   } catch {
-    endpoint.contractError = `${address} on chain ${endpoint.chainId} does not answer as a Mozaic canvas.`
+    if (current()) endpoint.contractError = `${address} on chain ${chainId} does not answer as a Mozaic canvas.`
     return false
   }
 }
 
-function describe(err: any, url: string) {
+function describe(err: any, url: string, current: () => boolean) {
   if (err?.name === 'TimeoutError') {
-    fail(`${hostOf(url)} did not answer within 8 seconds.`, 'The node may be starting up, or the port may be firewalled.')
+    fail(`${hostOf(url)} did not answer within 8 seconds.`, 'The node may be starting up, or the port may be firewalled.', current)
     return
   }
   if (err instanceof HttpError) {
-    fail(`${hostOf(url)} answered ${err.status} ${err.statusText}.`, 'Check the path. A ZVM node serves JSON-RPC at /rpc.')
+    fail(`${hostOf(url)} answered ${err.status} ${err.statusText}.`, 'Check the path. A ZVM node serves JSON-RPC at /rpc.', current)
     return
   }
   if (err?.message === 'not an EVM RPC') {
-    fail(`${hostOf(url)} answered, but not like an EVM node.`, 'Point this at the ZVM RPC rather than the NoM RPC.')
+    fail(`${hostOf(url)} answered, but not like an EVM node.`, 'Point this at the ZVM RPC rather than the NoM RPC.', current)
     return
   }
   fail(
@@ -365,6 +436,7 @@ function describe(err: any, url: string) {
     isLoopback(url)
       ? 'Start the node, or check the port. If it is running, your browser may be asking you to allow access to local network devices.'
       : 'Check the node is running and reachable, and that it allows requests from this page.',
+    current,
   )
 }
 
@@ -376,14 +448,33 @@ export function hostOf(url: string): string {
   }
 }
 
-function fail(error: string, hint: string | null) {
+function clearCanvas(current: () => boolean): boolean {
+  for (const [key, value] of Object.entries({canvas: null, router: null, contractError: null})) {
+    if (!current()) return false
+    Object.assign(endpoint, {[key]: value})
+  }
+  return current()
+}
+
+function clearChain(current: () => boolean): boolean {
+  if (!current()) return false
+  contractGeneration++
+  canvasReading = null
+  for (const [key, value] of Object.entries({latency: null, chainId: null, apiBase: null,
+    contract: null, contractSource: null, deployBlock: null, canvas: null, router: null, contractError: null})) {
+    if (!current()) return false
+    Object.assign(endpoint, {[key]: value})
+  }
+  return current()
+}
+
+function fail(error: string, hint: string | null, current: () => boolean) {
+  if (!clearChain(current)) return
   endpoint.health = 'error'
+  if (!current()) return
   endpoint.error = error
+  if (!current()) return
   endpoint.hint = hint
-  endpoint.latency = null
-  endpoint.chainId = null
-  endpoint.apiBase = null
-  endpoint.canvas = null
 }
 
 export const reachable = computed(() => endpoint.health === 'ok')

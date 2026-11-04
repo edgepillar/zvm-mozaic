@@ -48,34 +48,65 @@ export function onBlock(fn: (head: number) => void): () => void {
 }
 
 let timer: number | undefined
-let lastSeen = 0
+let lastSeen: number | null = null
 let started = false
+let generation = 0
+let armGeneration = 0
+let reading: {generation: number; promise: Promise<void>} | null = null
 
 const hidden = () => typeof document !== 'undefined' && document.hidden
 
-async function poll() {
-  if (!reachable.value || endpoint.chainId === null || hidden()) return
+function poll(): Promise<void> {
+  if (!reachable.value || endpoint.chainId === null || hidden()) return Promise.resolve()
+  const selected = generation
+  if (reading?.generation === selected) return reading.promise
+  const rpc = endpoint.rpc, chainId = endpoint.chainId
+  const current = () => generation === selected && endpoint.rpc === rpc &&
+    endpoint.chainId === chainId && reachable.value && !hidden()
+  let accept!: () => void
+  let decline!: (reason: unknown) => void
+  const completed = new Promise<void>((resolve, reject) => {accept = resolve; decline = reject})
+  const promise = completed.finally(() => {
+    if (reading?.promise === promise) reading = null
+  })
+  reading = {generation: selected, promise}
+  void read(chainId, current).then(accept, decline)
+  return promise
+}
+
+async function read(chainId: number, current: () => boolean): Promise<void> {
   try {
-    const client = publicClient(endpoint.chainId)
+    const client = publicClient(chainId)
+    if (!current()) return
     const number = Number(await client.getBlockNumber({cacheTime: 0}))
-    chain.chainId = endpoint.chainId
+    if (!current()) return
+    chain.chainId = chainId
+    if (!current()) return
     chain.error = null
-    if (number === lastSeen) return
+    if (!current() || number === lastSeen) return
     const block = await client.getBlock({blockNumber: BigInt(number)})
+    if (!current()) return
     chain.baseFee = block.baseFeePerGas ?? null
-    // Blocks carry NoM's timestamps, and several may have landed since the
-    // last look, so the gap is averaged over however many there were.
-    if (chain.timestamp && lastSeen && number > lastSeen) {
+    if (!current()) return
+    // Preserve the original per-block exponential cadence estimate.
+    if (chain.timestamp && lastSeen !== null && number > lastSeen) {
       const gap = (Number(block.timestamp) - chain.timestamp) / (number - lastSeen)
       if (gap > 0 && gap < 120) chain.interval = chain.interval * 0.7 + gap * 0.3
     }
+    if (!current()) return
     lastSeen = number
     chain.head = number
+    if (!current()) return
     chain.timestamp = Number(block.timestamp)
+    if (!current()) return
     chain.landedAt = Date.now()
-    onBlockListeners.forEach((fn) => fn(number))
+    if (!current()) return
+    for (const fn of onBlockListeners) {
+      if (!current()) break
+      fn(number)
+    }
   } catch (err: any) {
-    chain.error = err?.shortMessage ?? err?.message ?? String(err)
+    if (current()) chain.error = err?.shortMessage ?? err?.message ?? String(err)
   }
 }
 
@@ -92,19 +123,28 @@ export function setBeat(seconds: number | null) {
   refreshNow()
 }
 
-function arm() {
+function arm(selected: number) {
+  if (armGeneration !== selected || hidden()) return
   clearTimeout(timer)
+  timer = undefined
   const every = override ?? (prefs.refresh ? Math.max(15, prefs.refresh) : 0)
   if (!every) return
   timer = window.setTimeout(async () => {
+    if (armGeneration !== selected || hidden()) return
+    timer = undefined
     await poll()
-    arm()
+    arm(selected)
   }, every * 1000)
 }
 
-/** Looks now, then on the configured beat. */
+/** Looks now, then on the configured beat. Returns the current shared read. */
 export function refreshNow() {
-  void poll().then(arm)
+  const selected = ++armGeneration
+  clearTimeout(timer)
+  timer = undefined
+  const pending = poll()
+  void pending.then(() => arm(selected))
+  return pending
 }
 
 export function startChainPolling() {
@@ -112,21 +152,31 @@ export function startChainPolling() {
   started = true
   refreshNow()
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) refreshNow()
+    if (document.hidden) {
+      generation++
+      reading = null
+      armGeneration++
+      clearTimeout(timer)
+      timer = undefined
+    } else refreshNow()
   })
 }
 
 watch(() => prefs.refresh, refreshNow)
 
-// A new node is a new chain until proven otherwise.
+// RPC, chain identity and health all delimit a heartbeat owner.
 watch(
-  () => endpoint.rpc,
+  () => [endpoint.rpc, endpoint.chainId, endpoint.health],
   () => {
-    lastSeen = 0
-    chain.head = null
-    chain.timestamp = null
-    chain.baseFee = null
-    chain.error = null
-    refreshNow()
+    const selected = ++generation
+    reading = null
+    lastSeen = null
+    for (const [key, value] of Object.entries({chainId: null, head: null, timestamp: null,
+      baseFee: null, interval: 15, landedAt: Date.now(), error: null})) {
+      if (generation !== selected) return
+      Object.assign(chain, {[key]: value})
+    }
+    if (generation === selected) return refreshNow()
   },
+  {flush: 'sync'},
 )
