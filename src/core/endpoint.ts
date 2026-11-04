@@ -317,6 +317,7 @@ async function run(url: string, current: () => boolean, selectRPC: (candidate: s
     try {
       const chainId = await chainIdOf(candidate, 8000)
       if (!current()) return false
+      const latency = Math.round(performance.now() - started)
       const base = /\/rpc$/.test(candidate) ? candidate.replace(/\/rpc$/, '') : null
       const apiBase = base && (await isZvmNode(base)) ? base : null
       if (!current() || !selectRPC(candidate)) return false
@@ -325,7 +326,7 @@ async function run(url: string, current: () => boolean, selectRPC: (candidate: s
       const selectedContract = contractGeneration
       endpoint.chainId = chainId
       if (!current()) return false
-      endpoint.latency = Math.round(performance.now() - started)
+      endpoint.latency = latency
       if (!current()) return false
       endpoint.apiBase = apiBase
       if (!current()) return false

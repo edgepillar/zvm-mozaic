@@ -28,7 +28,7 @@ function lowerErrorConstructor(value) {
 
 async function fixture(options = {}) {
   const requests = [], reads = [], clients = [], writes = [], saved = new Map(options.saved ?? [])
-  let blocked = false, tick = 0, onFetch = null, onStateWrite = null, onClient = null
+  let blocked = false, tick = 0, clock = null, onFetch = null, onStateWrite = null, onClient = null
   const request = (rows, values) => {
     let resolve, reject
     const promise = new Promise((yes, no) => {resolve = yes; reject = no})
@@ -36,7 +36,7 @@ async function fixture(options = {}) {
   }
   const context = createContext({URL, URLSearchParams,
     location: {search: options.search ?? '', protocol: 'http:'},
-    performance: {now: () => ++tick}, AbortSignal: {timeout: milliseconds => ({milliseconds})},
+    performance: {now: () => clock ?? ++tick}, AbortSignal: {timeout: milliseconds => ({milliseconds})},
     localStorage: {getItem: key => saved.get(key) ?? null,
       setItem(key, value) {saved.set(key, value); writes.push({key, value})},
       removeItem(key) {saved.delete(key); writes.push({key, value: null})}},
@@ -93,7 +93,7 @@ async function fixture(options = {}) {
     for (const [i, value] of [width, height, price, OWNER].entries()) await answer(start + i, value)
   }
   return {api, requests, reads, clients, writes, saved, reply, approve, reject, answer, canvas,
-    block: value => {blocked = value}, reenterFetch: callback => {onFetch = callback},
+    time: value => {clock = value}, block: value => {blocked = value}, reenterFetch: callback => {onFetch = callback},
     observeState: callback => {onStateWrite = callback}, reenterClient: callback => {onClient = callback},
     seed(values = {}) {Object.assign(api.endpoint, {rpc: urlOf(alpha), chainId: 1, health: 'ok', contract: CANVAS_A, ...values})},
     async healthy(host = alpha, chainId = 1) {
@@ -375,4 +375,13 @@ test('current canvas errors keep the captured address and chain and recover on t
   assert.match(f.api.endpoint.contractError, new RegExp(CANVAS_A + ' on chain 1'))
   for (const index of [1, 2, 3]) await f.answer(index, 0n)
   const next = f.api.checkContract(); await f.canvas(4); assert.equal(await next, true); assert.equal(f.api.endpoint.contractError, null)
+})
+
+test('RPC latency excludes time spent waiting for the optional API lookup', async () => {
+  const f = await fixture(); f.time(1000); const pending = f.api.check()
+  f.time(1100); await f.reply(f.requests[0], {result: '0x1'})
+  assert.equal(f.requests[1].url, alpha + '/api/info')
+  f.time(1900); await f.reply(f.requests[1], {})
+  assert.equal(await pending, true); assert.equal(f.api.endpoint.latency, 100)
+  assert.equal(f.api.endpoint.apiBase, alpha); assert.equal(f.requests.length, 2)
 })
