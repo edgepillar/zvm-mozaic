@@ -38,7 +38,6 @@ const PAINTED_BY_TOPIC = keccak256(toBytes('PaintedBy(address,address,uint256)')
 const CLEARED_TOPIC = keccak256(toBytes('Cleared(uint256)'))
 
 /** What the logs are read from: the canvas, and its router when it has one. */
-const sources = (): Address[] => [endpoint.contract, endpoint.router].filter((a): a is Address => !!a)
 
 export interface Paint {
   tx: Hex
@@ -136,8 +135,9 @@ let dirty: {x0: number; y0: number; x1: number; y1: number} | null = null
  * that block any more, so those painters are forgotten; a paint later than
  * the clear, already applied by the live sync, keeps its painter.
  */
-function cleared(block: number, pixels: boolean) {
+function cleared(block: number, pixels: boolean, owns: () => boolean) {
   if (board.clearedAt === null || block > board.clearedAt) board.clearedAt = block
+  if (!owns()) return
   if (pixels) {
     rgba.fill(0)
     dirty = {x0: 0, y0: 0, x1: W - 1, y1: H - 1}
@@ -167,12 +167,15 @@ function set(index: number, rgb: number) {
   }
 }
 
-function flush() {
+function flush(owns: () => boolean) {
   if (!dirty || !image) return
   const d = dirty
   dirty = null
   sctx.putImageData(image, 0, 0, d.x0, d.y0, d.x1 - d.x0 + 1, d.y1 - d.y0 + 1)
-  changed.forEach((fn) => fn())
+  for (const fn of changed) {
+    if (!owns()) return
+    fn()
+  }
 }
 
 // --- who wants to know ----------------------------------------------------------
@@ -194,6 +197,70 @@ export function onArrived(fn: (p: Paint[]) => void): () => void {
 
 // --- reading the chain ----------------------------------------------------------
 
+interface BoardContext {
+  generation: number
+  rpc: string
+  chainId: number
+  address: Address
+  canvas: NonNullable<typeof endpoint.canvas>
+  deployBlock: number | null
+}
+
+let generation = 0
+let logGeneration = 0
+let historyGeneration = 0
+let active: BoardContext | null = null
+let loading: {context: BoardContext; promise: Promise<void>} | null = null
+let syncing: {context: BoardContext; epoch: number; promise: Promise<void>; again: boolean} | null = null
+let totalsReading: {context: BoardContext; promise: Promise<void>} | null = null
+let knownHead: {context: BoardContext; head: number} | null = null
+let totalsAt = 0
+
+function current(context: BoardContext): boolean {
+  return active === context && generation === context.generation && ready.value &&
+    endpoint.rpc === context.rpc && endpoint.chainId === context.chainId &&
+    endpoint.contract === context.address && endpoint.canvas === context.canvas
+}
+
+function requireCurrent(owns: () => boolean) {
+  if (!owns()) throw new Error('Board context changed')
+}
+
+function logScope(context: BoardContext) {
+  const router = endpoint.router, epoch = logGeneration
+  return {epoch, addresses: [context.address, ...(router ? [router] : [])],
+    owns: () => current(context) && logGeneration === epoch && endpoint.router === router}
+}
+
+function invalidate(): number {
+  const selected = ++generation
+  logGeneration++
+  historyGeneration++
+  active = null
+  loading = syncing = totalsReading = null
+  knownHead = null
+  totalsAt = 0
+  const owns = () => generation === selected && active === null
+  for (const [key, value] of Object.entries({progress: 0, error: null, width: 0, height: 0,
+    syncedTo: 0, historyFrom: null, historyLoading: false, painted: null, clearedAt: null, balance: null})) {
+    if (!owns()) return selected
+    Object.assign(board, {[key]: value})
+  }
+  if (!owns()) return selected
+  paints.value = []
+  if (!owns()) return selected
+  // Keep layer dimensions and draft storage untouched while the node is unavailable.
+  rgba.fill(0)
+  painterOf.fill(0)
+  blockOf.fill(0)
+  painterList.length = 0
+  painterIds.clear()
+  dirty = null
+  if (image) sctx.putImageData(image, 0, 0)
+  if (owns()) board.status = 'idle'
+  return selected
+}
+
 let nextId = 1
 
 /**
@@ -201,15 +268,18 @@ let nextId = 1
  * megabyte each, and batching ten of them would hold the first back until the
  * last arrived, which is exactly what the progressive load is there to avoid.
  */
-async function rpc<T = any>(method: string, params: unknown[], timeoutMs = 60_000): Promise<T> {
-  const res = await fetch(endpoint.rpc, {
+async function rpc<T = any>(context: BoardContext, method: string, params: unknown[], timeoutMs = 60_000, owns = () => current(context)): Promise<T> {
+  requireCurrent(owns)
+  const res = await fetch(context.rpc, {
     method: 'POST',
     headers: {'content-type': 'application/json'},
     body: JSON.stringify({jsonrpc: '2.0', id: nextId++, method, params}),
     signal: AbortSignal.timeout(timeoutMs),
   })
+  requireCurrent(owns)
   if (!res.ok) throw new Error(`${method}: ${res.status} ${res.statusText}`)
   const body = await res.json()
+  requireCurrent(owns)
   if (body.error) throw new Error(body.error.message ?? `${method} failed`)
   return body.result as T
 }
@@ -226,23 +296,25 @@ interface RawLog {
  * so a paint and the name it was painted in arrive together and in order.
  * Split when the node refuses a range as too big.
  */
-async function logs(address: Address[], from: number, to: number): Promise<RawLog[]> {
+async function logs(context: BoardContext, address: Address[], from: number, to: number, owns: () => boolean): Promise<RawLog[]> {
+  requireCurrent(owns)
   if (from > to) return []
   try {
-    return await rpc<RawLog[]>('eth_getLogs', [
+    return await rpc<RawLog[]>(context, 'eth_getLogs', [
       {address, topics: [[PAINTED_TOPIC, PAINTED_BY_TOPIC, CLEARED_TOPIC]], fromBlock: `0x${from.toString(16)}`, toBlock: `0x${to.toString(16)}`},
-    ])
+    ], 60_000, owns)
   } catch (err) {
+    requireCurrent(owns)
     // The devnet node caps a query at 20,000 results. Halve and retry.
     if (to - from < 1) throw err
     const mid = Math.floor((from + to) / 2)
-    return [...(await logs(address, from, mid)), ...(await logs(address, mid + 1, to))]
+    return [...(await logs(context, address, from, mid, owns)), ...(await logs(context, address, mid + 1, to, owns))]
   }
 }
 
-async function logsChunked(address: Address[], from: number, to: number): Promise<RawLog[]> {
+async function logsChunked(context: BoardContext, address: Address[], from: number, to: number, owns: () => boolean): Promise<RawLog[]> {
   const out: RawLog[] = []
-  for (let a = from; a <= to; a += LOG_SPAN) out.push(...(await logs(address, a, Math.min(to, a + LOG_SPAN - 1))))
+  for (let a = from; a <= to; a += LOG_SPAN) out.push(...(await logs(context, address, a, Math.min(to, a + LOG_SPAN - 1), owns)))
   return out
 }
 
@@ -252,17 +324,18 @@ async function logsChunked(address: Address[], from: number, to: number): Promis
  * named, which for a paint session is the wallet that funded the session:
  * the canvas itself only ever sees the router.
  */
-function apply(raw: RawLog[], pixels: boolean): Paint[] {
+function apply(raw: RawLog[], pixels: boolean, owns: () => boolean): Paint[] {
   const out: Paint[] = []
   const buf: Px[] = []
   const artistOf = new Map<string, Address>()
   for (const l of raw) {
+    if (!owns()) return out
     if (l.topics[0] === PAINTED_BY_TOPIC) {
       artistOf.set(l.transactionHash, `0x${l.topics[1].slice(26)}` as Address)
       continue
     }
     if (l.topics[0] === CLEARED_TOPIC) {
-      cleared(parseInt(l.blockNumber, 16), pixels)
+      cleared(parseInt(l.blockNumber, 16), pixels, owns)
       continue
     }
     const sender = `0x${l.topics[1].slice(26)}` as Address
@@ -315,140 +388,179 @@ function applyChunk(result: Hex) {
   }
 }
 
-let generation = 0
+/** Loads the canvas from scratch; only the current pending snapshot is shared. */
+export function load(): Promise<void> {
+  if (loading && current(loading.context)) return loading.promise
+  const canvas = endpoint.canvas, address = endpoint.contract, chainId = endpoint.chainId, rpc = endpoint.rpc
+  const selected = invalidate()
+  if (!ready.value || !canvas || !address || chainId === null || generation !== selected ||
+    endpoint.rpc !== rpc || endpoint.canvas !== canvas || endpoint.contract !== address || endpoint.chainId !== chainId) return Promise.resolve()
+  const context: BoardContext = {generation: selected, rpc, chainId, address, canvas, deployBlock: endpoint.deployBlock}
+  active = context
+  let accept!: () => void
+  let decline!: (reason: unknown) => void
+  const completed = new Promise<void>((resolve, reject) => {accept = resolve; decline = reject})
+  const promise = completed.finally(() => {
+    if (loading?.promise === promise) loading = null
+  })
+  loading = {context, promise}
+  void snapshot(context).then(accept, decline)
+  return promise
+}
 
-/** Loads the canvas from scratch: shape, snapshot, then the history window. */
-export async function load() {
-  const gen = ++generation
-  const canvas = endpoint.canvas
-  const address = endpoint.contract
-  if (!canvas || !address) return
-  board.status = 'loading'
-  board.progress = 0
-  board.error = null
-  board.historyFrom = null
-  board.clearedAt = null
-  paints.value = []
-  board.width = canvas.width
-  board.height = canvas.height
-  allocate(canvas.width, canvas.height)
-  changed.forEach((fn) => fn())
-
+async function snapshot(context: BoardContext) {
+  const owns = () => current(context), canvas = context.canvas
   try {
-    const head = parseInt(await rpc<Hex>('eth_blockNumber', []), 16)
+    board.status = 'loading'
+    if (!owns()) return
+    board.width = canvas.width
+    if (!owns()) return
+    board.height = canvas.height
+    if (!owns()) return
+    allocate(canvas.width, canvas.height)
+    if (!owns()) return
+    for (const fn of changed) {
+      if (!owns()) return
+      fn()
+    }
+    const head = parseInt(await rpc<Hex>(context, 'eth_blockNumber', []), 16)
+    if (!owns()) return
     const slots = (canvas.width * canvas.height) / PER_SLOT
     const starts: number[] = []
     for (let s = 0; s < slots; s += SLOTS_PER_CALL) starts.push(s)
     let done = 0
-    // Three at a time: the rows fill in as they arrive rather than all at the end.
     const queue = [...starts]
-    await Promise.all(
-      Array.from({length: 3}, async () => {
-        for (let start = queue.shift(); start !== undefined; start = queue.shift()) {
-          const data = encodeFunctionData({abi: MOZAIC_ABI, functionName: 'chunk', args: [BigInt(start), BigInt(SLOTS_PER_CALL)]})
-          const result = await rpc<Hex>('eth_call', [{to: address, data}, 'latest'])
-          if (gen !== generation) return
-          applyChunk(result)
-          flush()
-          board.progress = ++done / starts.length
-        }
-      }),
-    )
-    if (gen !== generation) return
+    // Preserve three workers, ten-thousand-slot calls and progressive rendering.
+    await Promise.all(Array.from({length: 3}, async () => {
+      for (let start = queue.shift(); start !== undefined; start = queue.shift()) {
+        if (!owns()) return
+        const data = encodeFunctionData({abi: MOZAIC_ABI, functionName: 'chunk', args: [BigInt(start), BigInt(SLOTS_PER_CALL)]})
+        const result = await rpc<Hex>(context, 'eth_call', [{to: context.address, data}, 'latest'])
+        if (!owns()) return
+        applyChunk(result)
+        flush(owns)
+        if (!owns()) return
+        board.progress = ++done / starts.length
+      }
+    }))
+    if (!owns()) return
     board.syncedTo = head
+    if (!owns()) return
     board.status = 'ready'
+    if (!owns()) return
     void refreshTotals(true)
-    // Anything painted while the snapshot loaded.
     void sync()
-    void loadHistory(gen, head)
+    void loadHistory(context, head)
   } catch (err: any) {
-    if (gen !== generation) return
+    if (!owns()) return
     board.status = 'error'
-    board.error = err?.message ?? String(err)
+    if (owns()) board.error = err?.message ?? String(err)
   }
 }
 
-async function loadHistory(gen: number, head: number) {
+async function loadHistory(context: BoardContext, head: number) {
+  const selected = ++historyGeneration, scope = logScope(context)
+  const owns = () => scope.owns() && historyGeneration === selected
+  if (!owns()) return
   board.historyLoading = true
   try {
-    const from = Math.max(endpoint.deployBlock ?? 0, head - HISTORY_BLOCKS, 0)
-    const raw = await logsChunked(sources(), from, head)
-    if (gen !== generation) return
-    // Only who and when: the pixels themselves are already in the snapshot,
-    // and repainting them here could undo something the live sync applied.
-    const older = apply(raw, false)
+    if (!owns()) return
+    const from = Math.max(context.deployBlock ?? 0, head - HISTORY_BLOCKS, 0)
+    const raw = await logsChunked(context, scope.addresses, from, head, owns)
+    if (!owns()) return
+    // History changes attribution only; newer live pixels and painters survive.
+    const older = apply(raw, false, owns)
+    if (!owns()) return
     paints.value = [...older, ...paints.value.filter((p) => p.block > head)]
-    board.historyFrom = from
+    if (owns()) board.historyFrom = from
   } catch {
     /* the activity list says it could not be read; the canvas is unaffected */
   } finally {
-    if (gen === generation) board.historyLoading = false
+    if (owns()) board.historyLoading = false
   }
 }
 
-let syncing: Promise<void> | null = null
-let again = false
-
-let knownHead: number | null = null
-
-/**
- * Applies every Painted event between what was applied and the head. The
- * head comes from chain.ts's beat, so a sync is one eth_getLogs; only a sync
- * with no beat behind it (just after the snapshot) asks for the head itself.
- */
+/** Apply every event through the beat's head; hints belong to this board only. */
 export function sync(head?: number): Promise<void> {
-  if (head !== undefined) knownHead = head
-  if (syncing) {
-    again = true
-    return syncing
+  const context = active
+  if (!context || !current(context)) return Promise.resolve()
+  if (head !== undefined) knownHead = {context, head}
+  if (board.status !== 'ready') return Promise.resolve()
+  const scope = logScope(context)
+  if (syncing?.context === context && syncing.epoch === scope.epoch) {
+    syncing.again = true
+    return syncing.promise
   }
-  syncing = (async () => {
+  let accept!: () => void
+  let decline!: (reason: unknown) => void
+  const completed = new Promise<void>((resolve, reject) => {accept = resolve; decline = reject})
+  const promise = completed.finally(() => {
+    if (syncing?.promise === promise) syncing = null
+  })
+  const owner = {context, epoch: scope.epoch, promise, again: false}
+  syncing = owner
+  const run = async () => {
     do {
-      again = false
-      const gen = generation
-      const address = endpoint.contract
-      if (board.status !== 'ready' || !address) return
+      owner.again = false
+      if (!scope.owns() || board.status !== 'ready') return
       try {
-        const head = knownHead ?? parseInt(await rpc<Hex>('eth_blockNumber', []), 16)
+        const hinted = knownHead?.context === context ? knownHead.head : null
         knownHead = null
-        if (head <= board.syncedTo) continue
-        const raw = await logsChunked(sources(), board.syncedTo + 1, head)
-        if (gen !== generation) return
-        const arrived = apply(raw, true)
-        flush()
-        board.syncedTo = head
+        const target = hinted ?? parseInt(await rpc<Hex>(context, 'eth_blockNumber', [], 60_000, scope.owns), 16)
+        if (!scope.owns()) return
+        if (target <= board.syncedTo) continue
+        const raw = await logsChunked(context, scope.addresses, board.syncedTo + 1, target, scope.owns)
+        if (!scope.owns()) return
+        const arrived = apply(raw, true, scope.owns)
+        if (!scope.owns()) return
+        flush(scope.owns)
+        if (!scope.owns()) return
+        board.syncedTo = target
+        if (!scope.owns()) return
         if (arrived.length) {
           paints.value = [...paints.value, ...arrived]
-          arrivals.forEach((fn) => fn(arrived))
+          for (const fn of arrivals) {
+            if (!scope.owns()) return
+            fn(arrived)
+          }
         }
       } catch {
         /* the next block tries again from the same place */
       }
-    } while (again)
-  })().finally(() => {
-    syncing = null
-  })
-  return syncing
+    } while (owner.again && scope.owns())
+  }
+  void run().then(accept, decline)
+  return promise
 }
 
-let totalsAt = 0
-
-/** The contract's counters: decoration, so read at most once a minute. */
-async function refreshTotals(force = false) {
-  const address = endpoint.contract
-  if (!address) return
-  if (!force && Date.now() - totalsAt < 60_000) return
+/** One current counter read, at most once a minute except the snapshot refresh. */
+function refreshTotals(force = false): Promise<void> {
+  const context = active
+  if (!context || !current(context) || board.status !== 'ready') return Promise.resolve()
+  if (totalsReading?.context === context) return totalsReading.promise
+  if (!force && Date.now() - totalsAt < 60_000) return Promise.resolve()
   totalsAt = Date.now()
-  try {
-    const [painted, balance] = await Promise.all([
-      rpc<Hex>('eth_call', [{to: address, data: encodeFunctionData({abi: MOZAIC_ABI, functionName: 'painted'})}, 'latest']),
-      rpc<Hex>('eth_getBalance', [address, 'latest']),
-    ])
-    board.painted = BigInt(painted)
-    board.balance = BigInt(balance)
-  } catch {
-    /* totals are decoration; the next block reads them again */
+  let accept!: () => void
+  const completed = new Promise<void>(resolve => {accept = resolve})
+  const promise = completed.finally(() => {
+    if (totalsReading?.promise === promise) totalsReading = null
+  })
+  totalsReading = {context, promise}
+  const read = async () => {
+    try {
+      const [painted, balance] = await Promise.all([
+        rpc<Hex>(context, 'eth_call', [{to: context.address, data: encodeFunctionData({abi: MOZAIC_ABI, functionName: 'painted'})}, 'latest']),
+        rpc<Hex>(context, 'eth_getBalance', [context.address, 'latest']),
+      ])
+      if (!current(context)) return
+      board.painted = BigInt(painted)
+      if (current(context)) board.balance = BigInt(balance)
+    } catch {
+      /* totals are decoration; the original minute cooldown still applies */
+    }
   }
+  void read().then(accept)
+  return promise
 }
 
 onBlock((head) => {
@@ -456,17 +568,23 @@ onBlock((head) => {
   void refreshTotals()
 })
 
-// A different node or canvas is a different picture.
 watch(
-  () => [ready.value, endpoint.rpc, endpoint.contract, endpoint.canvas] as const,
-  ([ok]) => {
-    if (ok) void load()
-    else {
-      generation++
-      board.status = 'idle'
-    }
-  },
+  () => [ready.value, endpoint.rpc, endpoint.chainId, endpoint.contract, endpoint.canvas] as const,
+  () => {void load()},
+  {flush: 'sync'},
 )
+
+// Router discovery can finish after the snapshot starts. Refresh attribution
+// and pending log reads without resetting the snapshot or a person's draft.
+watch(() => endpoint.router, () => {
+  logGeneration++
+  historyGeneration++
+  syncing = null
+  const context = active
+  if (!context || !current(context) || board.status !== 'ready') return
+  void sync()
+  void loadHistory(context, board.syncedTo)
+}, {flush: 'sync'})
 
 /** The canvas, or a part of it, as a PNG. */
 export function exportPng(x = 0, y = 0, w = W, h = H): Promise<Blob | null> {
