@@ -42,5 +42,5 @@ jobs:
       - run: cp .env.example .env
       - run: npm run typecheck
       - run: npm run build
-      - name: Check production canvas and gallery with controlled loopback RPC
+      - name: Check production canvas, gallery and native draft storage with controlled loopback RPC
         run: npm run test:board-browser

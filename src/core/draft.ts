@@ -75,6 +75,9 @@ class Layer {
     else this.dirty.push(i)
   }
 
+  /** Redraw captured saved pixels after a partition is attached or restored. */
+  refresh() { this.allDirty = true }
+
   /** Pushes what changed into the surface the view draws. */
   paint() {
     const img = this.img
@@ -177,6 +180,7 @@ function write(i: number, rgb: number | undefined) {
   if (rgb === undefined) draft.delete(i)
   else draft.set(i, rgb)
   if (costs(i)) changed++
+  if (ownsDraft() && !activeDraft!.record.loaded) activeDraft!.record.edited.add(i)
 }
 
 // --- strokes, undo and redo ------------------------------------------------------
@@ -350,69 +354,195 @@ watch(
 // --- keeping the draft across reloads -------------------------------------------
 
 const storeKey = () => (endpoint.chainId && endpoint.contract ? `draft.${endpoint.chainId}.${endpoint.contract.toLowerCase()}` : null)
-let saveTimer: number | undefined
-let restoredFor: string | null = null
 
-function save() {
-  const key = storeKey()
-  if (!key || restoredFor !== key) return
-  clearTimeout(saveTimer)
-  saveTimer = window.setTimeout(() => {
-    // Six bytes a pixel, the contract's own format.
-    const bytes = new Uint8Array(draft.size * 6)
-    let o = 0
-    for (let i = 0; i < draft.has.length; i++) {
-      if (!draft.has[i]) continue
-      const c = draft.color[i]
-      bytes[o++] = i >> 16
-      bytes[o++] = (i >> 8) & 0xff
-      bytes[o++] = i & 0xff
-      bytes[o++] = c >> 16
-      bytes[o++] = (c >> 8) & 0xff
-      bytes[o++] = c & 0xff
-    }
-    idb.put(key, bytes).catch(() => {
-      /* private mode or blocked storage: the draft holds for this tab */
+interface SavedDraft {
+  key: string
+  has: Uint8Array
+  color: Uint32Array
+  size: number
+  edited: Set<number>
+  loaded: boolean
+  reading: Promise<void> | null
+  writing: Promise<void> | null
+  timer: number | undefined
+  version: number
+  savedVersion: number
+  failedWrite: boolean
+  legacy: string | null
+}
+
+// Keep only the active partition and unfinished/failed work. Detached arrays
+// retain unsaved edits without copying a million pixels on every animation frame.
+const savedDrafts = new Map<string, SavedDraft>()
+let storageEpoch = 0
+let activeDraft: {epoch: number; record: SavedDraft} | null = null
+const storageContext = () => [board.status, endpoint.rpc, endpoint.chainId, endpoint.contract,
+  endpoint.canvas, board.width, board.height] as const
+const ownsDraft = () => activeDraft !== null && activeDraft.epoch === storageEpoch &&
+  board.status === 'ready' && storeKey() === activeDraft.record.key
+
+function capture(record: SavedDraft) {
+  record.has = draft.has
+  record.color = draft.color
+  record.size = draft.size
+}
+
+function release(record: SavedDraft) {
+  const safe = record.loaded ? !record.failedWrite && record.version === record.savedVersion :
+    record.size === 0 && record.edited.size === 0
+  if (activeDraft?.record !== record && safe && !record.reading && !record.writing &&
+    record.timer === undefined && savedDrafts.get(record.key) === record) savedDrafts.delete(record.key)
+}
+
+function bytesOf(record: SavedDraft): Uint8Array {
+  // Count the captured membership itself: an edit can precede its next frame.
+  let count = 0
+  for (const present of record.has) count += present
+  const bytes = new Uint8Array(count * 6)
+  let o = 0
+  for (let i = 0; i < record.has.length; i++) {
+    if (!record.has[i]) continue
+    const c = record.color[i]
+    bytes[o++] = i >> 16
+    bytes[o++] = (i >> 8) & 0xff
+    bytes[o++] = i & 0xff
+    bytes[o++] = c >> 16
+    bytes[o++] = (c >> 8) & 0xff
+    bytes[o++] = c & 0xff
+  }
+  return bytes
+}
+
+function queueSave(record: SavedDraft) {
+  // A failed/unfinished read must never turn unknown saved data into an empty write.
+  if (!record.loaded) return
+  clearTimeout(record.timer)
+  record.timer = window.setTimeout(() => {
+    record.timer = undefined
+    const bytes = bytesOf(record), version = record.version
+    const previous = record.writing
+    const writing = (previous ?? Promise.resolve()).catch(() => {}).then(() => idb.put(record.key, bytes))
+    record.writing = writing
+    void writing.then(() => {
+      record.savedVersion = Math.max(record.savedVersion, version)
+      record.failedWrite = false
+      if (record.legacy !== null) {
+        try {
+          const key = `mozaic.${record.key}`
+          if (localStorage.getItem(key) === record.legacy) localStorage.removeItem(key)
+          record.legacy = null
+        } catch { /* keep blocked legacy storage untouched */ }
+      }
+    }, () => {
+      // Keep this partition in the tab, including across node/canvas changes.
+      record.failedWrite = true
+    }).finally(() => {
+      if (record.writing === writing) record.writing = null
+      release(record)
     })
   }, 1200)
 }
 
-// A new canvas starts with an empty draft and its own saved one, if any.
-watch(
-  () => board.status,
-  async (s) => {
-    if (s === 'loading') {
-      draft.reset()
-      pending.reset()
-      changed = 0
-      undoStack.length = redoStack.length = 0
-      landing.length = 0
-      restoredFor = null
-      schedule()
-    }
-    if (s === 'ready') {
-      const key = storeKey()
-      if (!key || restoredFor === key) return
-      let bytes: Uint8Array | null = null
-      try {
-        bytes = await idb.get(key)
-        // The first versions kept drafts in localStorage, as hex.
-        const legacy = localStorage.getItem(`mozaic.${key}`)
-        if (!bytes && legacy) bytes = Uint8Array.from(legacy.match(/../g) ?? [], (h) => parseInt(h, 16))
-        localStorage.removeItem(`mozaic.${key}`)
-      } catch {
-        /* nothing saved, or blocked storage */
-      }
-      restoredFor = key
-      if (bytes) {
-        for (let o = 0; o + 6 <= bytes.length; o += 6) {
-          const i = (bytes[o] << 16) | (bytes[o + 1] << 8) | bytes[o + 2]
-          if (i < W * H) write(i, (bytes[o + 3] << 16) | (bytes[o + 4] << 8) | bytes[o + 5])
-        }
-        if (draft.size) toast(`Your draft of ${draft.size.toLocaleString()} pixels is back.`, 'info')
-      }
-      schedule()
-    }
-  },
-)
+function save() {
+  if (!ownsDraft()) return
+  const record = activeDraft!.record
+  capture(record)
+  record.version++
+  queueSave(record)
+}
 
+function publishSaved(record: SavedDraft) {
+  if (!ownsDraft() || activeDraft!.record !== record) return
+  draft.size = record.size
+  draft.refresh()
+  recountAll = true
+  schedule()
+}
+
+function readSaved(record: SavedDraft) {
+  if (record.loaded || record.reading) return
+  const reading = (async () => {
+    let bytes: Uint8Array | null
+    try { bytes = await idb.get(record.key) }
+    catch {
+      // Retain local edits and retry on the next ready context. Do not overwrite
+      // a partition whose original bytes could not be read.
+      return
+    }
+    if (bytes !== null && (!(bytes instanceof Uint8Array) || bytes.length % 6 !== 0)) return
+    try {
+      const legacy = localStorage.getItem(`mozaic.${record.key}`)
+      if (legacy && legacy.length % 12 === 0 && /^[0-9a-f]+$/i.test(legacy)) {
+        record.legacy = legacy
+        if (!bytes) bytes = Uint8Array.from(legacy.match(/../g)!, h => parseInt(h, 16))
+        record.version++
+      }
+    } catch { /* blocked legacy storage is left untouched */ }
+    if (bytes) {
+      for (let o = 0; o + 6 <= bytes.length; o += 6) {
+        const i = (bytes[o] << 16) | (bytes[o + 1] << 8) | bytes[o + 2]
+        if (i >= record.has.length || record.edited.has(i)) continue
+        record.has[i] = 1
+        record.color[i] = (bytes[o + 3] << 16) | (bytes[o + 4] << 8) | bytes[o + 5]
+      }
+    }
+    record.size = record.has.reduce((sum, present) => sum + present, 0)
+    record.loaded = true
+    record.edited.clear()
+    if (ownsDraft() && activeDraft!.record === record && record.size) {
+      toast(`Your draft of ${record.size.toLocaleString()} pixels is back.`, 'info')
+    }
+    publishSaved(record)
+    if (record.version !== record.savedVersion) queueSave(record)
+  })()
+  record.reading = reading
+  void reading.finally(() => {
+    if (record.reading === reading) record.reading = null
+    release(record)
+  })
+}
+
+// Retire synchronously, including A -> B -> A and loading -> loading changes.
+// Save timers and reads own captured partition arrays, never the later draft.
+watch(storageContext, () => {
+  if (activeDraft) {
+    const record = activeDraft.record
+    capture(record)
+    record.version++
+    queueSave(record)
+    activeDraft = null
+    release(record)
+  }
+  storageEpoch++
+}, {flush: 'sync'})
+
+watch(storageContext, ([s]) => {
+  if (s === 'loading') {
+    draft.reset()
+    pending.reset()
+    changed = 0
+    undoStack.length = redoStack.length = 0
+    landing.length = 0
+    schedule()
+  }
+  if (s !== 'ready' || ownsDraft()) return
+  const key = storeKey()
+  if (!key) return
+  let record = savedDrafts.get(key)
+  if (!record) {
+    record = {key, has: draft.has, color: draft.color, size: draft.size, edited: new Set(),
+      loaded: false, reading: null, writing: null, timer: undefined, version: 0,
+      savedVersion: 0, failedWrite: false, legacy: null}
+    savedDrafts.set(key, record)
+  } else if (record.has !== draft.has) {
+    for (let i = 0; i < Math.min(record.has.length, draft.has.length); i++) {
+      draft.has[i] = record.has[i]
+      draft.color[i] = record.color[i]
+    }
+    draft.size = draft.has.reduce((sum, present) => sum + present, 0)
+    capture(record)
+  }
+  activeDraft = {epoch: storageEpoch, record}
+  publishSaved(record)
+  readSaved(record)
+})

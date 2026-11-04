@@ -43,3 +43,6 @@ These bounded module, isolated-contract and Chrome entry controls leave real
 wallet/provider/extension behavior, wider navigation and concurrency/crash cases,
 other supported browsers/platforms, real NoM/finality/economic configurations and
 maintainer/operator/release acceptance open.
+
+Draft storage context, native IndexedDB coverage and remaining persistence limits
+are described in [DRAFT_CONTEXT.md](DRAFT_CONTEXT.md).
