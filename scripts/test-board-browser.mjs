@@ -120,25 +120,28 @@ await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); origin = '
 const executablePath = process.env.CHROME_PATH || ['/usr/bin/google-chrome', '/usr/bin/chromium', '/opt/google/chrome/chrome'].find(existsSync)
 assert.ok(executablePath, 'An installed Chrome is required; this control never downloads a browser')
 let browser
-const results = []
+const results = [], failures = []
 async function stats(page) {return page.evaluate(() => Array.from(document.querySelectorAll('.stats-body b'), node => node.textContent.trim()))}
 async function waitStats(page, painted, balance) {
+  active.phase = 'current counters ' + painted + '/' + balance
   await page.waitForFunction((p, b) => {const rows = Array.from(document.querySelectorAll('.stats-body b'), node => node.textContent.trim())
     return Number(rows[0]?.replaceAll(',', '')) === p && Number(rows[2]?.replaceAll(',', '')) === b}, {timeout: 20_000}, painted, balance)
 }
 async function changeNode(page, url) {
+  active.phase = 'actual node picker'
   await page.click('[data-testid="node-picker"]')
   await page.waitForSelector('#rpc-url', {visible: true})
   await page.$eval('#rpc-url', (input, value) => {input.value = value; input.dispatchEvent(new Event('input', {bubbles: true}))}, url)
   await page.$eval('#rpc-url', input => input.closest('form').requestSubmit())
 }
-async function quiet(page) {await page.waitForNetworkIdle({idleTime: 250, timeout: 20_000}); await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))}
+async function quiet(page) {active.phase = 'network idle after released HTTP replies'; await page.waitForNetworkIdle({idleTime: 250, timeout: 20_000}); await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))}
 
 const PIXEL = 500 * 1000 + 500
 const draftKey = chain => `draft.${chain}.${A.toLowerCase()}`
 const draftBytes = (index, rgb) => [index >> 16, index >> 8 & 255, index & 255, rgb >> 16, rgb >> 8 & 255, rgb & 255]
 async function untilAsync(test, label) {const started = Date.now(); while (!await test()) {assert.ok(Date.now() - started < 20_000, label); await later(30)}}
 async function badge(page, count) {
+  active.phase = 'actual draft pixels ' + count
   await page.waitForFunction(n => Number(document.querySelector('.rail-badge')?.textContent.trim() ?? 0) === n, {timeout: 20_000}, count)
 }
 async function drawPixel(page) {
@@ -186,6 +189,8 @@ async function storageKeeper(context, seeds = {}) {
     },
     async release() {return page.evaluate(async () => {const state = window.fixtureLock; state.released = true; await state.completed
       return {mode: state.mode, requests: state.requests, timedOut: state.timedOut, completed: true}})},
+    async unlockIfHeld() {return page.evaluate(async () => {const state = window.fixtureLock; if (!state) return {held: false}
+      state.released = true; await state.completed; return {held: true, requests: state.requests, timedOut: state.timedOut}})},
     async read(key) {return page.evaluate(key => new Promise((resolve, reject) => {
       const tx = window.fixtureDB.transaction('kv', 'readonly'), req = tx.objectStore('kv').get(key)
       let value; req.onsuccess = () => {value = req.result}; tx.oncomplete = () => resolve(value ? Array.from(value) : [])
@@ -198,6 +203,20 @@ async function storageKeeper(context, seeds = {}) {
   }
 }
 
+async function failureDetail(error, state, page) {
+  const observed = await Promise.race([
+    page.evaluate(() => ({visibility: document.visibilityState,
+      stats: Array.from(document.querySelectorAll('.stats-body b'), node => node.textContent.trim()),
+      draftPixels: Number(document.querySelector('.rail-badge')?.textContent.trim() ?? 0),
+      canvasRGB: (() => {const c = document.querySelector('[data-testid="board"]'); return c ? Array.from(c.getContext('2d').getImageData(4, 4, 1, 1).data).slice(0, 3) : null})()})),
+    later(1000).then(() => null),
+  ]).catch(() => null)
+  return {case: state.name, source, phase: state.phase, errorType: error.name,
+    message: String(error.message).slice(0, 240), observed,
+    heldReplies: Array.from(state.held, ([name, row]) => ({name, released: row.released === true})),
+    RPCRequests: state.calls.length, contractRequests: state.contractCalls.length}
+}
+
 try {
   browser = await puppeteer.launch({executablePath, headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--no-first-run']})
   const browserVersion = await browser.version()
@@ -205,6 +224,10 @@ try {
     active = {name, held: new Map(), calls: [], contractCalls: []}; const state = active
     console.log('MOZAIC-BOARD-BROWSER-START ' + JSON.stringify({case: name, source}))
     const context = await browser.createBrowserContext(), page = await context.newPage()
+    let keeper, legacyValue
+    const caseStart = results.length, errorStart = errors.length, unexpectedStart = unexpected.length
+    state.phase = 'setup'
+    try {
     page.setDefaultTimeout(20_000); await page.setViewport({width: 1440, height: 1000})
     page.on('pageerror', error => errors.push(String(error)))
     await page.setRequestInterception(true)
@@ -213,7 +236,6 @@ try {
       if (url.startsWith(origin + '/') || url.startsWith('data:') || url.startsWith('blob:')) void request.continue()
       else {unexpected.push(new URL(url).origin); void request.abort('blockedbyclient')}
     })
-    let keeper, legacyValue
     if (['draft-context', 'draft-fast-return', 'draft-storage-reload', 'legacy-storage-migration'].includes(name)) {
       const seeds = {[draftKey(13370)]: name === 'draft-context' || name === 'draft-fast-return' ? draftBytes(1, 0xff0000) : [],
         [draftKey(13371)]: name === 'draft-context' ? draftBytes(2, 0x00ff00) : []}
@@ -222,7 +244,12 @@ try {
       if (name === 'legacy-storage-migration') {legacyValue = Buffer.from(draftBytes(1, 0xff0000)).toString('hex'); await keeper.legacy(draftKey(13370), legacyValue); await keeper.lock('readonly')}
     }
     const query = new URLSearchParams({rpc: origin + '/node/a/rpc', contract: A, x: '0', y: '0', z: '8', ...(name === 'late-router' ? {router: R} : {})})
+    // Opening the keeper tab can background the product. Its real visibility
+    // and animation-frame polling must match the foreground UI under test.
+    await page.bringToFront()
+    state.phase = 'production entry'
     await page.goto(origin + base + '?' + query, {waitUntil: 'domcontentloaded'})
+    assert.equal(await page.evaluate(() => document.visibilityState), 'visible')
     await page.waitForSelector('[data-testid="node-picker"]')
     if (name === 'old-head') {
       await until(() => state.held.has('head'), 'The original A snapshot head must actually be pending')
@@ -326,19 +353,35 @@ try {
       await page.waitForFunction(() => {const rows = Array.from(document.querySelectorAll('.stats-body b'), node => node.textContent.trim()); return rows[0] === '-' && rows[2] === '-'})
       results.push({case: name, observedUnavailableStats: await stats(page), pass: true})
     }
-    assert.equal(unexpected.length, 0); assert.deepEqual(errors, [])
-    const result = {...results.at(-1), source, actualProductionBundleAndVueDOM: true, controlledLoopbackRPC: true, walletProviderOrPublicNetwork: false}
-    console.log('MOZAIC-BOARD-BROWSER ' + JSON.stringify(result)); await context.close()
+    assert.equal(unexpected.length, unexpectedStart); assert.deepEqual(errors.slice(errorStart), [])
+    const result = {...results.at(-1), source, actualProductionBundleAndVueDOM: true, controlledLoopbackRPC: true, walletProviderOrPublicNetwork: false, actualProductPageVisibility: await page.evaluate(() => document.visibilityState)}
+    assert.equal(result.actualProductPageVisibility, 'visible')
+    console.log('MOZAIC-BOARD-BROWSER ' + JSON.stringify(result))
+    } catch (error) {
+      results.length = caseStart
+      const failure = await failureDetail(error, state, page); failures.push(failure)
+      console.log('MOZAIC-BOARD-BROWSER-FAILURE ' + JSON.stringify(failure))
+    } finally {
+      for (const row of state.held.values()) if (!row.released) row.release()
+      if (keeper) {
+        try {const closed = await keeper.unlockIfHeld(); assert.ok(!closed.timedOut)}
+        catch (error) {const failure = {case: name, source, phase: 'native fixture cleanup', errorType: error.name, message: String(error.message).slice(0, 240)}; failures.push(failure); console.log('MOZAIC-BOARD-BROWSER-FAILURE ' + JSON.stringify(failure))}
+      }
+      await context.close()
+    }
   }
+  console.log('MOZAIC-BOARD-BROWSER-AGGREGATE ' + JSON.stringify({source, attempted: 12, passed: results.length, failures}))
+  assert.deepEqual(failures, [], 'All independent production scenarios must pass')
   assert.equal(results.length, 12); assert.deepEqual(errors, []); assert.deepEqual(unexpected, [])
   assert.ok(delivered.has('index.html') && Array.from(delivered.keys()).some(name => name.endsWith('.js')))
   console.log('MOZAIC-BOARD-BROWSER-SUMMARY ' + JSON.stringify({schema: 1, source, cases: 12, passed: 12, failed: 0,
     browserVersion, nodeVersion: process.version, platform: process.platform, architecture: process.arch,
+    actualProductPageVisibility: 'visible', independentScenarioFailuresCollectedBeforeFinalVerdict: true,
     actualProductionEntryRoutes: ['canvas', 'gallery'], actualDraftPixelsPreserved: 1, actualIndexedDBAndLegacyStorage: true, nativeStorageLockCases: 3, actualDraftReloadCases: 1,
     servedBuildFiles: Object.fromEntries(Array.from(delivered).sort()), unexpectedExternalRequests: 0, pageOrFixtureErrors: 0,
     walletProvidersConnected: 0, publicNetworkOrRealNoMExecution: false, sourceTestHooksOrProductModuleReplacements: 0}))
 } catch (error) {
-  console.log('MOZAIC-BOARD-BROWSER-FAILURE ' + JSON.stringify({case: active?.name, source,
+  console.log('MOZAIC-BOARD-BROWSER-RUN-FAILURE ' + JSON.stringify({case: active?.name, source,
     errorType: error.name, message: String(error.message).slice(0, 240),
     heldReplies: Array.from(active?.held ?? [], ([name, row]) => ({name, released: row.released === true})),
     RPCRequests: active?.calls.length, contractRequests: active?.contractCalls.length}))
