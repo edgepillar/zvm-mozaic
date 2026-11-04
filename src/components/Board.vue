@@ -12,7 +12,7 @@
 // numbers; the status line under the canvas is the one reactive object, and
 // it is written at most once a frame.
 import {computed, onBeforeUnmount, onMounted, reactive, ref, watch} from 'vue'
-import {board, colorAt, onArrived, onChanged, paints, surface, whoPainted, W, H, type Paint} from '../core/board'
+import {board, colorAt, onArrived, onAttributionChanged, onChanged, paints, surface, whoPainted, W, H, type Paint} from '../core/board'
 import {beginStroke, draftSurface, endStroke, onLayers, pending, pendingSurface, put, remove, seen, draftState} from '../core/draft'
 import {axis, prefs, putDown, used} from '../core/prefs'
 import {blend, toHex} from '../core/color'
@@ -766,6 +766,12 @@ function readPixel(p: Pt): Picked {
   }
 }
 
+/** Refresh inspection only; history does not repaint or recount draft pixels. */
+function refreshDetails() {
+  if (picked.value) picked.value = inside(picked.value) ? readPixel(picked.value) : null
+  if (hover) describe(hover)
+}
+
 /**
  * No painter known. When the page has read every paint since the canvas was
  * deployed, that means nobody ever painted it; otherwise the last paint here
@@ -773,7 +779,11 @@ function readPixel(p: Pt): Picked {
  */
 const unknownWhy = computed(() => {
   const c = picked.value
-  if (!c || c.painter) return ''
+  if (!c) return ''
+  if (board.status !== 'ready') return 'Canvas details are unavailable.'
+  if (c.painter) return ''
+  if (board.historyLoading) return 'Reading recent activity...'
+  if (board.historyFrom === null) return 'Recent activity could not be read.'
   if (board.clearedAt !== null && chain.head !== null && c.color === 0xffffff) return `Blank since the owner cleared the canvas, ${agoBlocks(chain.head - board.clearedAt)}.`
   const everything = board.historyFrom !== null && endpoint.deployBlock !== null && board.historyFrom <= endpoint.deployBlock
   return everything ? 'Never painted.' : 'Not painted in the last day. Who painted it before then is older than this page reads.'
@@ -918,10 +928,13 @@ watch(
       viewed = true
       initialView()
     }
+    refreshDetails()
     invalidate()
     drawMiniSoon()
   },
 )
+// A new head can age a selected paint while its live log read is still pending.
+watch(() => [chain.head, chain.interval] as const, refreshDetails)
 watch(
   () => [prefs.grid, prefs.showDraft, prefs.mirrorX, prefs.mirrorY, prefs.tool, guide.visible, guide.opacity, guide.x, guide.y, guide.picture, stamp.value],
   invalidate,
@@ -950,19 +963,18 @@ onMounted(() => {
   // someone else's paint), so the status line is rewritten with the layers.
   offs.push(
     onChanged(() => {
-      if (picked.value) picked.value = readPixel(picked.value)
-      if (hover) describe(hover)
+      refreshDetails()
       invalidate()
       drawMiniSoon()
     }),
   )
   offs.push(
     onLayers(() => {
-      if (picked.value) picked.value = readPixel(picked.value)
-      if (hover) describe(hover)
+      refreshDetails()
       invalidate()
     }),
   )
+  offs.push(onAttributionChanged(refreshDetails))
   offs.push(
     onArrived((ps) => {
       const now = performance.now()

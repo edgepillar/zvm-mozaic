@@ -18,6 +18,7 @@ assert.match(source, /^[0-9a-f]{40}$/)
 const js = stripTypeScriptTypes(readFileSync('src/core/abi.ts', 'utf8'), {mode: 'strip'})
 const {MOZAIC_ABI, ROUTER_ABI} = await import('data:text/javascript;base64,' + Buffer.from(js).toString('base64'))
 const A = '0x' + '1'.repeat(40), B = '0x' + '2'.repeat(40), OTHER = '0x' + '5'.repeat(40), R = '0x' + '3'.repeat(40), ARTIST = '0x' + '4'.repeat(40)
+const DETAIL_TX = '0x' + 'c'.repeat(64), DETAIL_INDEX = 500_500
 const TX = '0x' + 'd'.repeat(64), hash = '0x' + 'e'.repeat(64), zero = '0x' + '0'.repeat(64)
 const hex = value => '0x' + BigInt(value).toString(16)
 const topic = value => keccak256(toBytes(value)), addressTopic = address => '0x' + address.slice(2).padStart(64, '0')
@@ -26,6 +27,13 @@ const canvasPaint = {address: A, blockNumber: '0x9', transactionHash: TX, transa
   topics: [topic('Painted(address,uint256,bytes)'), addressTopic(R)], data: encodeAbiParameters([{type: 'uint256'}, {type: 'bytes'}], [1n, px])}
 const routerPaint = {address: R, blockNumber: '0x9', transactionHash: TX, transactionIndex: '0x0', logIndex: '0x0', blockHash: hash, removed: false,
   topics: [topic('PaintedBy(address,address,uint256)'), addressTopic(ARTIST), addressTopic(ARTIST)], data: encodeAbiParameters([{type: 'uint256'}], [1n])}
+const DETAIL_CASES = ['late-history-details','late-router-details','live-details','history-unavailable-details','unavailable-details']
+function detailPaint({block = 9, painter = ARTIST, transaction = TX, rgb = 0x112233} = {}) {
+  const packed = '0x' + DETAIL_INDEX.toString(16).padStart(6, '0') + rgb.toString(16).padStart(6, '0')
+  return {...canvasPaint, blockNumber: hex(block), transactionHash: transaction,
+    topics: [canvasPaint.topics[0], addressTopic(painter)],
+    data: encodeAbiParameters([{type: 'uint256'}, {type: 'bytes'}], [1n, packed])}
+}
 let active, origin
 const delivered = new Map(), unexpected = [], errors = []
 const encode = (abi, functionName, result) => encodeFunctionResult({abi, functionName, result})
@@ -37,7 +45,7 @@ function hold(state, name, result) {
 }
 async function rpc(state, node, call, batched) {
   state.calls.push({node, method: call.method, params: call.params, batched})
-  const head = node === 'a' ? 10 : 20
+  const head = state.head ?? (node === 'a' ? 10 : 20)
   const second = node === 'b' || call.params?.[0]?.to?.toLowerCase() === B || call.params?.[0]?.toLowerCase?.() === B
   if (call.method === 'eth_chainId') return hex(node === 'a' ? 13370 : 13371)
   if (call.method === 'eth_blockNumber') {
@@ -59,7 +67,7 @@ async function rpc(state, node, call, batched) {
     state.contractCalls.push({node, functionName, args: args.map(String), to: call.params[0].to})
     if (router) {
       assert.equal(functionName, 'canvas'); const value = encode(abi, functionName, A)
-      if (state.name === 'late-router' && node === 'a' && !state.held.has('router')) return hold(state, 'router', value)
+      if (['late-router', 'late-router-details'].includes(state.name) && node === 'a' && !state.held.has('router')) return hold(state, 'router', value)
       return value
     }
     if (functionName === 'WIDTH' || functionName === 'HEIGHT') return encode(abi, functionName, 1000n)
@@ -72,6 +80,10 @@ async function rpc(state, node, call, batched) {
     }
     assert.equal(functionName, 'chunk')
     assert.equal(args[1], 10_000n)
+    if (DETAIL_CASES.includes(state.name)) {
+      const slot = Math.floor(DETAIL_INDEX / 10), value = args[0] === 50_000n ? '0x' + slot.toString(16).padStart(8, '0') + BigInt(0x112233 ^ 0xffffff).toString(16).padStart(64, '0') : '0x'
+      return encode(abi, functionName, value)
+    }
     const colour = ['old-chunk', 'canvas-switch'].includes(state.name) ? (second ? 0x446688 : 0xff0000) : 0x112233
     const value = args[0] === 0n ? '0x00000000' + (BigInt(colour ^ 0xffffff)).toString(16).padStart(64, '0') : '0x'
     const encoded = encode(abi, functionName, value)
@@ -81,7 +93,18 @@ async function rpc(state, node, call, batched) {
   if (call.method === 'eth_getLogs') {
     if (['old-history', 'old-log-error'].includes(state.name) && node === 'a' && !state.held.has('history')) return hold(state, 'history', [canvasPaint])
     const filter = call.params[0], from = Number(filter.fromBlock), to = Number(filter.toBlock)
+    if (['late-history-details','history-unavailable-details'].includes(state.name) && node === 'a' && !state.held.has('detail-history')) return hold(state, 'detail-history', [detailPaint()])
+    if (state.name === 'history-unavailable-details') return {fixtureError: 'controlled recent history refusal'}
+    if (state.name === 'live-details') {
+      if (from <= 11 && to >= 11) return !state.held.has('detail-live') ? hold(state, 'detail-live', [detailPaint({block: 11, transaction: DETAIL_TX, rgb: 0x445566})]) : []
+      return from <= 9 && to >= 9 ? [detailPaint()] : []
+    }
     if (from > 9 || to < 9) return []
+    if (state.name === 'late-history-details' || state.name === 'unavailable-details') return [detailPaint()]
+    if (state.name === 'late-router-details') {
+      const addresses = [filter.address].flat().map(value => value.toLowerCase())
+      return [...(addresses.includes(R.toLowerCase()) ? [routerPaint] : []), detailPaint({painter: R})]
+    }
     const addresses = [filter.address].flat().map(value => value.toLowerCase())
     const paint = {...canvasPaint, address: addresses.includes(B) ? B : A,
       topics: [canvasPaint.topics[0], addressTopic(node === 'b' && ['old-history', 'old-log-error'].includes(state.name) ? OTHER : R)]}
@@ -203,6 +226,43 @@ async function storageKeeper(context, seeds = {}) {
   }
 }
 
+
+async function selectDetailPixel(page) {
+  active.phase = 'actual selected pixel and stationary pointer'
+  const canvas = await page.$('[data-testid="board"]'), box = await canvas.boundingBox()
+  assert.ok(box && box.width > 100 && box.height > 100)
+  assert.equal(await canvas.evaluate(node => getComputedStyle(node).cursor), 'grab')
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
+  await page.waitForSelector('[data-testid="pick"]', {visible: true})
+  await page.waitForSelector('[data-testid="hud"]', {visible: true})
+  assert.ok(await page.$eval('[data-testid="pick"]', node => node.textContent.includes('500, 500')))
+}
+async function detailArtist(page, address) {
+  active.phase = 'selected and stationary hover attribution'
+  await page.waitForFunction(address => {
+    const selected = document.querySelector('[data-testid="pick-painter"]')
+    const hover = document.querySelector('[data-testid="hud"]')
+    return selected?.getAttribute('title')?.toLowerCase() === address.toLowerCase() &&
+      Array.from(hover?.parentElement?.querySelectorAll('[title]') ?? []).some(node => node.getAttribute('title')?.toLowerCase() === address.toLowerCase())
+  }, {timeout: 20_000}, address)
+}
+async function pickText(page, text) {
+  active.phase = 'selected detail text: ' + text
+  await page.waitForFunction(value => document.querySelector('[data-testid="pick"]')?.textContent.includes(value), {timeout: 20_000}, text)
+}
+async function pauseThroughPicker(page) {
+  await page.click('[data-testid="node-picker"]')
+  await page.waitForSelector('#rpc-url', {visible: true})
+  const buttons = await page.$$('button')
+  let paused
+  for (const button of buttons) if (await button.evaluate(node => node.textContent.trim() === 'Paused')) {paused = button; break}
+  assert.ok(paused); await paused.click()
+  await page.click('dialog[open] button[title="Close"]')
+  await page.waitForSelector('dialog[open]', {hidden: true})
+}
+
+async function quietExceptHeld(page) {await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))}
+
 async function failureDetail(error, state, page) {
   const observed = await Promise.race([
     page.evaluate(() => ({visibility: document.visibilityState,
@@ -220,7 +280,7 @@ async function failureDetail(error, state, page) {
 try {
   browser = await puppeteer.launch({executablePath, headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--no-first-run']})
   const browserVersion = await browser.version()
-  for (const name of ['old-head', 'old-totals', 'late-router', 'unavailable', 'old-chunk', 'old-history', 'old-log-error', 'canvas-switch', 'draft-context', 'draft-fast-return', 'draft-storage-reload', 'legacy-storage-migration']) {
+  for (const name of ['old-head', 'old-totals', 'late-router', 'unavailable', 'old-chunk', 'old-history', 'old-log-error', 'canvas-switch', 'draft-context', 'draft-fast-return', 'draft-storage-reload', 'legacy-storage-migration', 'late-history-details', 'late-router-details', 'live-details', 'history-unavailable-details', 'unavailable-details']) {
     active = {name, held: new Map(), calls: [], contractCalls: []}; const state = active
     console.log('MOZAIC-BOARD-BROWSER-START ' + JSON.stringify({case: name, source}))
     const context = await browser.createBrowserContext(), page = await context.newPage()
@@ -243,7 +303,7 @@ try {
       if (name === 'draft-context') await keeper.lock()
       if (name === 'legacy-storage-migration') {legacyValue = Buffer.from(draftBytes(1, 0xff0000)).toString('hex'); await keeper.legacy(draftKey(13370), legacyValue); await keeper.lock('readonly')}
     }
-    const query = new URLSearchParams({rpc: origin + '/node/a/rpc', contract: A, x: '0', y: '0', z: '8', ...(name === 'late-router' ? {router: R} : {})})
+    const query = new URLSearchParams({rpc: origin + '/node/a/rpc', contract: A, x: DETAIL_CASES.includes(name) ? '500' : '0', y: DETAIL_CASES.includes(name) ? '500' : '0', z: '8', ...(['late-router', 'late-router-details'].includes(name) ? {router: R} : {})})
     // Opening the keeper tab can background the product. Its real visibility
     // and animation-frame polling must match the foreground UI under test.
     await page.bringToFront()
@@ -348,6 +408,57 @@ try {
       const stored = await keeper.read(draftKey(13370)); assert.equal(stored.length, 6); await badge(page, 1)
       results.push({case: name, actualNativeIndexedDBReadonlyLock: true, legacyRetainedWhileWriteBlocked: true,
         legacyRemovedOnlyAfterActualCommit: true, actualCommittedDraftBytes: stored.length, pass: true})
+    } else if (name === 'late-history-details') {
+      await until(() => state.held.has('detail-history'), 'The original current history must be held')
+      await waitStats(page, 5, 6); await selectDetailPixel(page)
+      await pickText(page, 'Reading recent activity...')
+      assert.equal(await page.$('[data-testid="pick-painter"]'), null)
+      state.held.get('detail-history').release(); await quiet(page); await detailArtist(page, ARTIST)
+      await pickText(page, 'block 9')
+      assert.equal(state.contractCalls.filter(row => row.functionName === 'chunk').length, 10)
+      results.push({case: name, actualPointerSelection: true, stationaryPointerAndSelectionUpdatedAfterHistory: true,
+        actualSelectedPainter: ARTIST, actualSelectedBlock: 9, loadingKnowledgeVisibleBeforeReply: true, currentSnapshotChunks: 10, pass: true})
+    } else if (name === 'late-router-details') {
+      await until(() => state.held.has('router'), 'The original router validation must be held')
+      await waitStats(page, 5, 6)
+      await page.waitForFunction(() => document.querySelector('.stats-body')?.textContent.includes('0x3333'))
+      await quietExceptHeld(page); await selectDetailPixel(page); await detailArtist(page, R)
+      state.held.get('router').release(); await quiet(page); await detailArtist(page, ARTIST)
+      assert.equal(state.contractCalls.filter(row => row.functionName === 'chunk').length, 10)
+      results.push({case: name, actualPointerSelection: true, stationaryPointerAndSelectionUpdatedAfterRouter: true,
+        priorSelectedPainter: R, actualSelectedPainter: ARTIST, currentSnapshotChunks: 10, pass: true})
+    } else if (name === 'live-details') {
+      await waitStats(page, 5, 6); await quiet(page); await selectDetailPixel(page); await detailArtist(page, ARTIST)
+      await pickText(page, 'block 9')
+      state.head = 300; await pauseThroughPicker(page)
+      await until(() => state.held.has('detail-live'), 'Current live logs must actually be held after the real picker changes cadence')
+      await pickText(page, '1 h ago'); await pickText(page, 'block 9')
+      assert.equal(state.held.get('detail-live').released, undefined)
+      state.held.get('detail-live').release(); await quiet(page); await pickText(page, 'block 11')
+      const tx = await page.$eval('[data-testid="pick"] a[href*="/tx/"]', node => node.href)
+      assert.equal(tx, origin + '/node/a/tx/' + DETAIL_TX)
+      await pickText(page, '#445566')
+      results.push({case: name, actualPointerSelection: true, actualCadencePickerUsed: true,
+        selectedAgeUpdatedWhileLiveLogsPending: '1 h ago', priorSelectedBlockWhilePending: 9,
+        actualSelectedBlockAfterLiveReply: 11, actualSelectedTransaction: DETAIL_TX,
+        actualSelectedColour: '#445566', pass: true})
+    } else if (name === 'history-unavailable-details') {
+      await until(() => state.held.has('detail-history'), 'The original failing history must actually be held')
+      await waitStats(page, 5, 6); await selectDetailPixel(page); await pickText(page, 'Reading recent activity...')
+      state.held.get('detail-history').release({fixtureError: 'controlled recent history refusal'})
+      await quiet(page); await pickText(page, 'Recent activity could not be read.')
+      assert.equal(await page.$('[data-testid="pick-painter"]'), null)
+      results.push({case: name, actualPointerSelection: true, failedHistoryDoesNotClaimNoPaint: true,
+        actualSelectedKnowledge: 'Recent activity could not be read.', currentSnapshotRemainsReady: true,
+        actualHistoryRequests: state.calls.filter(row => row.method === 'eth_getLogs').length, pass: true})
+    } else if (name === 'unavailable-details') {
+      await waitStats(page, 5, 6); await quiet(page); await selectDetailPixel(page); await detailArtist(page, ARTIST)
+      await changeNode(page, ''); await pickText(page, 'Canvas details are unavailable.'); await pickText(page, '#ffffff')
+      assert.equal(await page.$('[data-testid="pick-painter"]'), null)
+      assert.equal(await page.$('[data-testid="pick"] a[href*="/tx/"]'), null)
+      results.push({case: name, actualPointerSelection: true, actualInvalidNodePickerUsed: true,
+        oldSelectedPainterAndTransactionCleared: true, actualSelectedColour: '#ffffff',
+        actualSelectedKnowledge: 'Canvas details are unavailable.', pass: true})
     } else {
       await waitStats(page, 5, 6); await quiet(page); await changeNode(page, '')
       await page.waitForFunction(() => {const rows = Array.from(document.querySelectorAll('.stats-body b'), node => node.textContent.trim()); return rows[0] === '-' && rows[2] === '-'})
@@ -370,14 +481,14 @@ try {
       await context.close()
     }
   }
-  console.log('MOZAIC-BOARD-BROWSER-AGGREGATE ' + JSON.stringify({source, attempted: 12, passed: results.length, failures}))
+  console.log('MOZAIC-BOARD-BROWSER-AGGREGATE ' + JSON.stringify({source, attempted: 17, passed: results.length, failures}))
   assert.deepEqual(failures, [], 'All independent production scenarios must pass')
-  assert.equal(results.length, 12); assert.deepEqual(errors, []); assert.deepEqual(unexpected, [])
+  assert.equal(results.length, 17); assert.deepEqual(errors, []); assert.deepEqual(unexpected, [])
   assert.ok(delivered.has('index.html') && Array.from(delivered.keys()).some(name => name.endsWith('.js')))
-  console.log('MOZAIC-BOARD-BROWSER-SUMMARY ' + JSON.stringify({schema: 1, source, cases: 12, passed: 12, failed: 0,
+  console.log('MOZAIC-BOARD-BROWSER-SUMMARY ' + JSON.stringify({schema: 1, source, cases: 17, passed: 17, failed: 0,
     browserVersion, nodeVersion: process.version, platform: process.platform, architecture: process.arch,
     actualProductPageVisibility: 'visible', independentScenarioFailuresCollectedBeforeFinalVerdict: true,
-    actualProductionEntryRoutes: ['canvas', 'gallery'], actualDraftPixelsPreserved: 1, actualIndexedDBAndLegacyStorage: true, nativeStorageLockCases: 3, actualDraftReloadCases: 1,
+    actualProductionEntryRoutes: ['canvas', 'gallery'], actualDraftPixelsPreserved: 1, actualIndexedDBAndLegacyStorage: true, nativeStorageLockCases: 3, actualDraftReloadCases: 1, actualPixelDetailCases: 5, stationaryPointerDetailCases: 2,
     servedBuildFiles: Object.fromEntries(Array.from(delivered).sort()), unexpectedExternalRequests: 0, pageOrFixtureErrors: 0,
     walletProvidersConnected: 0, publicNetworkOrRealNoMExecution: false, sourceTestHooksOrProductModuleReplacements: 0}))
 } catch (error) {

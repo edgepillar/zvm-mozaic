@@ -182,6 +182,7 @@ function flush(owns: () => boolean) {
 
 const changed = new Set<() => void>()
 const arrivals = new Set<(p: Paint[]) => void>()
+const attributionChanged = new Set<() => void>()
 
 /** Called whenever pixels changed, for a redraw. */
 export function onChanged(fn: () => void): () => void {
@@ -193,6 +194,19 @@ export function onChanged(fn: () => void): () => void {
 export function onArrived(fn: (p: Paint[]) => void): () => void {
   arrivals.add(fn)
   return () => arrivals.delete(fn)
+}
+
+/** History can change a pixel's attribution without changing its colour. */
+export function onAttributionChanged(fn: () => void): () => void {
+  attributionChanged.add(fn)
+  return () => attributionChanged.delete(fn)
+}
+
+function notifyAttribution(owns: () => boolean) {
+  for (const fn of attributionChanged) {
+    if (!owns()) return
+    fn()
+  }
 }
 
 // --- reading the chain ----------------------------------------------------------
@@ -472,7 +486,11 @@ async function loadHistory(context: BoardContext, head: number) {
     const older = apply(raw, false, owns)
     if (!owns()) return
     paints.value = [...older, ...paints.value.filter((p) => p.block > head)]
-    if (owns()) board.historyFrom = from
+    if (!owns()) return
+    board.historyFrom = from
+    if (!owns()) return
+    board.historyLoading = false
+    notifyAttribution(owns)
   } catch {
     /* the activity list says it could not be read; the canvas is unaffected */
   } finally {
@@ -513,12 +531,14 @@ export function sync(head?: number): Promise<void> {
         if (!scope.owns()) return
         const arrived = apply(raw, true, scope.owns)
         if (!scope.owns()) return
+        // Pixel listeners inspect the matching transaction as well as colour.
+        if (arrived.length) paints.value = [...paints.value, ...arrived]
+        if (!scope.owns()) return
         flush(scope.owns)
         if (!scope.owns()) return
         board.syncedTo = target
         if (!scope.owns()) return
         if (arrived.length) {
-          paints.value = [...paints.value, ...arrived]
           for (const fn of arrivals) {
             if (!scope.owns()) return
             fn(arrived)

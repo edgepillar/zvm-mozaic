@@ -46,3 +46,5 @@ maintainer/operator/release acceptance open.
 
 Draft storage context, native IndexedDB coverage and remaining persistence limits
 are described in [DRAFT_CONTEXT.md](DRAFT_CONTEXT.md).
+
+Current selected-pixel/history publication is described in [PIXEL_DETAILS.md](PIXEL_DETAILS.md).
