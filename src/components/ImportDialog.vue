@@ -63,14 +63,17 @@ async function load(f: File) {
   }
 }
 
+// Clear stale input at the first prop change. Actions wait until the parent
+// has patched both open and file, and the native dialog has been updated.
+watch(() => [props.open, props.file] as const, retire, {flush: 'sync'})
 watch(
   () => [props.open, props.file] as const,
   ([open, file]) => {
-    if (!open) {retire(); return}
+    if (disposed || !open) return
     if (file) void load(file)
-    else {retire(); input.value?.click()}
+    else input.value?.click()
   },
-  {immediate: true, flush: 'sync'},
+  {immediate: true, flush: 'post'},
 )
 onBeforeUnmount(() => {disposed = true; retire()})
 

@@ -21,18 +21,27 @@ reads release their URLs, and a bitmap allocated after cancellation is closed.
 There is no timer-based resource lifetime. Existing format detection, vector
 viewBox fallback, scaling, transparency and placement rules remain.
 
+## Parent props and actions
+
+Retirement remains synchronous. Starting a read or opening the file picker waits
+until Vue has patched both parent props and updated the dialog. This avoids
+acting on an intermediate open/file pair during a file drop. The actual board
+drop case must show its decoded SVG without opening an unrelated native file
+chooser. All 26 first-image witness bodies remain unchanged; one drop case adds
+the paired-prop path. See [Vue watcher timing](https://vuejs.org/guide/essentials/watchers.html#callback-flush-timing).
+
 ## Evidence boundaries
 
 The memory controls execute the actual ImportDialog SFC script with an explicit
 decode/disposal port, and the actual image module with explicit native-image,
 bitmap, URL, canvas, clock and Vue ports. They do not compile Vue, decode an
 image in a real browser or execute a wallet, SDK, storage or node. Six original
-behaviours are reproduced; 19 candidate controls cover selection, late errors,
+behaviours are reproduced; 20 candidate controls cover selection, late errors,
 close/unmount, normal placement, cancellation and resource disposal. The 164
 previous module/script controls are retained.
 
-The required production witness retains all 22 prior scenarios and adds four
-image cases. It uses the actual compiled Vue/DOM, native File/Blob/DataTransfer,
+The required production witness retains all 22 prior scenarios and adds five
+image cases, including the actual parent file-drop path. It uses the actual compiled Vue/DOM, native File/Blob/DataTransfer,
 PNG/SVG decoders, file-input change handlers, range keyboard and placement UI.
 It opens and cancels the native file chooser; controlled tiny files are assigned
 to the actual input through DataTransfer. This does not qualify OS file reading
@@ -48,8 +57,8 @@ dialog in one page task through
 Every independent scenario is attempted before the verdict, with source,
 browser/platform and delivered production-file digests retained.
 
-Current-source hosted CI is still required for 183 module/script controls,
-26 native Chrome scenarios, all 35 original isolated contract events, fresh
+Current-source hosted CI is still required for 184 module/script controls,
+27 native Chrome scenarios, all 35 original isolated contract events, fresh
 contract/ABI drift checks, TypeScript and production build. Wider format/size,
 browser/platform, concurrent modal/tab/crash, real wallet/provider/NoM and
 maintainer/operator/release requirements remain open. All original roadmap

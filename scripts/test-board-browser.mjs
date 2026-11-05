@@ -29,7 +29,7 @@ const routerPaint = {address: R, blockNumber: '0x9', transactionHash: TX, transa
   topics: [topic('PaintedBy(address,address,uint256)'), addressTopic(ARTIST), addressTopic(ARTIST)], data: encodeAbiParameters([{type: 'uint256'}], [1n])}
 const DETAIL_CASES = ['late-history-details','late-router-details','live-details','history-unavailable-details','unavailable-details']
 const GESTURE_CASES = ["pointer-cancel", "held-pointer-context", "pinch-spray", "deferred-route", "view-dimensions"]
-const IMAGE_CASES = ['image-stamp', 'image-close', 'image-replace-guide', 'image-close-pending']
+const IMAGE_CASES = ['image-stamp', 'image-close', 'image-replace-guide', 'image-close-pending', 'image-drop']
 function detailPaint({block = 9, painter = ARTIST, transaction = TX, rgb = 0x112233} = {}) {
   const packed = '0x' + DETAIL_INDEX.toString(16).padStart(6, '0') + rgb.toString(16).padStart(6, '0')
   return {...canvasPaint, blockNumber: hex(block), transactionHash: transaction,
@@ -356,7 +356,7 @@ async function failureDetail(error, state, page) {
 try {
   browser = await puppeteer.launch({executablePath, headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--no-first-run']})
   const browserVersion = await browser.version()
-  for (const name of ['old-head', 'old-totals', 'late-router', 'unavailable', 'old-chunk', 'old-history', 'old-log-error', 'canvas-switch', 'draft-context', 'draft-fast-return', 'draft-storage-reload', 'legacy-storage-migration', 'late-history-details', 'late-router-details', 'live-details', 'history-unavailable-details', 'unavailable-details', 'pointer-cancel', 'held-pointer-context', 'pinch-spray', 'deferred-route', 'view-dimensions', 'image-stamp', 'image-close', 'image-replace-guide', 'image-close-pending']) {
+  for (const name of ['old-head', 'old-totals', 'late-router', 'unavailable', 'old-chunk', 'old-history', 'old-log-error', 'canvas-switch', 'draft-context', 'draft-fast-return', 'draft-storage-reload', 'legacy-storage-migration', 'late-history-details', 'late-router-details', 'live-details', 'history-unavailable-details', 'unavailable-details', 'pointer-cancel', 'held-pointer-context', 'pinch-spray', 'deferred-route', 'view-dimensions', 'image-stamp', 'image-close', 'image-replace-guide', 'image-close-pending', 'image-drop']) {
     active = {name, held: new Map(), calls: [], contractCalls: []}; const state = active
     console.log('MOZAIC-BOARD-BROWSER-START ' + JSON.stringify({case: name, source}))
     const context = await browser.createBrowserContext(), page = await context.newPage()
@@ -651,6 +651,27 @@ try {
       await page.click('dialog[open] button[title="Close"]');await badge(page,0)
       results.push({case:name,actualFileInputChangeAndCloseInOneTask:true,actualImageAndProductAPIsUnmodified:true,
         actualReopenedDialogRejectsLatePreview:true,actualDraftPixels:0,controlledFile:file,pass:true})
+
+    } else if (name === 'image-drop') {
+      state.phase = 'actual parent file-drop props and settled native import action'
+      await waitStats(page,5,6);await quiet(page);await badge(page,0)
+      const picker=page.waitForFileChooser({timeout:1500}).then(async value=>{await value.cancel();return true},error=>{
+        if(error.name!=='TimeoutError')throw error
+        return false
+      })
+      const file=await page.evaluate(()=>{
+        const svg='<svg xmlns="http://www.w3.org/2000/svg" width="4" height="2" viewBox="0 0 4 2"><rect width="4" height="2" fill="red"/></svg>'
+        const file=new File([svg],'drop.svg',{type:''}),transfer=new DataTransfer();transfer.items.add(file)
+        const canvas=document.querySelector('[data-testid="board"]')
+        if(!canvas)throw new Error('The actual file-drop board is unavailable')
+        canvas.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:transfer}))
+        return {name:file.name,type:file.type,bytes:file.size}
+      })
+      await smallImage(page);const opened=await picker;assert.equal(opened,false)
+      await page.click('dialog[open] button[title="Close"]');await page.waitForFunction(()=>!document.querySelector('dialog[open]'));await badge(page,0)
+      results.push({case:name,actualNativeFileBlobAndBoardDropEvent:true,actualParentOpenAndFilePropsUsed:true,
+        actualDroppedSVGDecodedInActualDialog:true,actualUnwantedNativeFileChoosers:0,
+        actualFileChooserObservationWindowMs:1500,actualRangeKeyboardUsed:true,actualDraftPixels:0,controlledFile:file,pass:true})
     } else {
       await waitStats(page, 5, 6); await quiet(page); await changeNode(page, '')
       await page.waitForFunction(() => {const rows = Array.from(document.querySelectorAll('.stats-body b'), node => node.textContent.trim()); return rows[0] === '-' && rows[2] === '-'})
@@ -673,14 +694,14 @@ try {
       await context.close()
     }
   }
-  console.log('MOZAIC-BOARD-BROWSER-AGGREGATE ' + JSON.stringify({source, attempted: 26, passed: results.length, failures}))
+  console.log('MOZAIC-BOARD-BROWSER-AGGREGATE ' + JSON.stringify({source, attempted: 27, passed: results.length, failures}))
   assert.deepEqual(failures, [], 'All independent production scenarios must pass')
-  assert.equal(results.length, 26); assert.deepEqual(errors, []); assert.deepEqual(unexpected, [])
+  assert.equal(results.length, 27); assert.deepEqual(errors, []); assert.deepEqual(unexpected, [])
   assert.ok(delivered.has('index.html') && Array.from(delivered.keys()).some(name => name.endsWith('.js')))
-  console.log('MOZAIC-BOARD-BROWSER-SUMMARY ' + JSON.stringify({schema: 1, source, cases: 26, passed: 26, failed: 0,
+  console.log('MOZAIC-BOARD-BROWSER-SUMMARY ' + JSON.stringify({schema: 1, source, cases: 27, passed: 27, failed: 0,
     browserVersion, nodeVersion: process.version, platform: process.platform, architecture: process.arch,
     actualProductPageVisibility: 'visible', independentScenarioFailuresCollectedBeforeFinalVerdict: true,
-    actualProductionEntryRoutes: ['canvas', 'gallery'], actualDraftPixelsPreserved: 1, actualIndexedDBAndLegacyStorage: true, nativeStorageLockCases: 3, actualDraftReloadCases: 1, actualPixelDetailCases: 5, stationaryPointerDetailCases: 2, actualGestureAndNavigationCases: 5, actualTouchInputCases: 3, actualRouteTimerBoundaryCases: 1, actualSmallCanvasCases: 1, actualImageImportCases: 4, actualNativePNGPlacementCases: 1, actualNativeSVGResourceCases: 2, actualExplicitObjectURLLifetimeCases: 3, actualPendingImportCloseCases: 1,
+    actualProductionEntryRoutes: ['canvas', 'gallery'], actualDraftPixelsPreserved: 1, actualIndexedDBAndLegacyStorage: true, nativeStorageLockCases: 3, actualDraftReloadCases: 1, actualPixelDetailCases: 5, stationaryPointerDetailCases: 2, actualGestureAndNavigationCases: 5, actualTouchInputCases: 3, actualRouteTimerBoundaryCases: 1, actualSmallCanvasCases: 1, actualImageImportCases: 5, actualNativeFileDropCases: 1, actualNativePNGPlacementCases: 1, actualNativeSVGResourceCases: 2, actualExplicitObjectURLLifetimeCases: 3, actualPendingImportCloseCases: 1,
     servedBuildFiles: Object.fromEntries(Array.from(delivered).sort()), unexpectedExternalRequests: 0, pageOrFixtureErrors: 0,
     walletProvidersConnected: 0, publicNetworkOrRealNoMExecution: false, sourceTestHooksOrProductModuleReplacements: 0}))
 } catch (error) {

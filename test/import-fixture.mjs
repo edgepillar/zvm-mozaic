@@ -4,30 +4,69 @@ import {createContext, SourceTextModule, SyntheticModule} from 'node:vm'
 
 // These are explicit memory capabilities, not Vue compilation, image decoding,
 // a browser, storage, a wallet or a node. Both actual scripts are tested below.
+// Getter watches compare their result by identity; explicit source arrays compare
+// members. Only dependency changes schedule callbacks. This follows the relevant
+// distinction in Vue 3.5.43 watch.ts; this port is not the Vue runtime.
 const tick = async () => {for (let i = 0; i < 12; i++) await Promise.resolve()}
 function vuePorts() {
-  const watches = [], refs = [], unmounted = []
-  let active = false, version = 0
-  const same = (a,b) => Array.isArray(a) && Array.isArray(b) ? a.length === b.length && a.every((v,i) => Object.is(v,b[i])) : Object.is(a,b)
-  const flush = (sync = false) => {
-    if (active) return
-    active = true
-    try {for (const w of watches) {
-      if (sync && w.opts?.flush !== 'sync') continue
-      const next = w.get()
-      if (!same(next,w.old)) {const old = w.old; w.old = next; w.fn(next,old)}
-    }} finally {active = false}
+  const watches=[], refs=[], unmounted=[], dependencies=new WeakMap()
+  let collecting=null, flushing=false
+  const dependency=(target,key)=>{
+    let fields=dependencies.get(target)
+    if(!fields){fields=new Map();dependencies.set(target,fields)}
+    if(!fields.has(key))fields.set(key,{version:0})
+    return fields.get(key)
   }
-  const reactive = object => new Proxy(object,{set(target,key,value) {if (!Object.is(target[key],value)) {target[key]=value;version++;flush(true)};return true}})
-  const ref = value => {const item=reactive({value});refs.push(item);return item}
-  const computed = get => {let at=-1,value;return {get value() {if(at!==version) {value=get();at=version};return value}}}
-  const watch = (source,fn,opts) => {
-    const get = typeof source === 'function' ? source : () => source.map(value => typeof value === 'function' ? value() : value.value)
-    const row={get,fn,opts,old:get()};watches.push(row)
-    if(opts?.immediate) fn(row.old,undefined)
+  const collect=get=>{
+    const before=collecting, deps=new Set();collecting=deps
+    try{return {value:get(),deps}}finally{collecting=before}
   }
-  return {vue:{reactive,ref,shallowRef:ref,computed,watch,onBeforeUnmount:fn=>unmounted.push(fn)},flush,
-    refs,unmount() {unmounted.forEach(fn=>fn())}}
+  const read=watch=>{const result=collect(watch.get);watch.deps=result.deps;return result.value}
+  const changed=(watch,next)=>watch.multiple ? next.some((value,i)=>!Object.is(value,watch.old[i])) : !Object.is(next,watch.old)
+  const flush=(sync=false)=>{
+    if(flushing)return
+    flushing=true
+    try{
+      for(let rounds=0;;rounds++){
+        const ready=watches.filter(w=>w.active && w.dirty && (!sync || w.opts?.flush==='sync'))
+        if(!ready.length)break
+        if(rounds>=32)throw new Error('The declared memory watcher capabilities did not settle')
+        for(const w of ready){
+          w.dirty=false;const next=read(w)
+          if(changed(w,next)){const old=w.old;w.old=next;w.fn(next,old)}
+        }
+      }
+    }finally{flushing=false}
+  }
+  const reactive=object=>new Proxy(object,{
+    get(target,key,receiver){const dep=dependency(target,key);collecting?.add(dep);return Reflect.get(target,key,receiver)},
+    set(target,key,value){
+      if(Object.is(target[key],value))return true
+      target[key]=value;const dep=dependency(target,key);dep.version++
+      for(const w of watches)if(w.deps.has(dep))w.dirty=true
+      flush(true);return true
+    }
+  })
+  const ref=value=>{const item=reactive({value});refs.push(item);return item}
+  const computed=get=>{
+    let available=false,value,versions=new Map()
+    return {get value(){
+      if(!available || [...versions].some(([dep,version])=>dep.version!==version)){
+        const result=collect(get);value=result.value;versions=new Map([...result.deps].map(dep=>[dep,dep.version]));available=true
+      }
+      for(const dep of versions.keys())collecting?.add(dep)
+      return value
+    }}
+  }
+  const watch=(source,fn,opts)=>{
+    const multiple=Array.isArray(source)
+    const get=typeof source==='function' ? source : multiple ? ()=>source.map(value=>typeof value==='function' ? value() : value.value) : ()=>source.value
+    const row={get,fn,opts,multiple,deps:new Set(),dirty:false,active:true,old:undefined}
+    row.old=read(row);watches.push(row)
+    if(opts?.immediate)fn(row.old,undefined)
+  }
+  return {vue:{reactive,ref,shallowRef:ref,computed,watch,onBeforeUnmount:fn=>unmounted.push(fn)},flush,refs,
+    unmount(){unmounted.forEach(fn=>fn());watches.forEach(w=>{w.active=false})}}
 }
 async function moduleWithPorts(code,ports,globals,identifier) {
   const context=createContext({console,Promise,AbortController,DOMException,Uint8ClampedArray,...globals})
@@ -60,10 +99,15 @@ export async function dialogFixture() {
   if(!script)throw new Error('Actual import dialog script missing')
   const tail=`\nexport const __calls={load,finish,asStamp,asGuide,pick};
 export function __state(){return {bitmap:bitmap.value,name:name.value,width:width.value,error:error.value,picture:picture.value}}
+export function __fileInput(value){input.value=value}
 `
   const namespace=await moduleWithPorts(script+tail,ports,{defineProps:()=>props,defineEmits:()=>type=>{emissions.push(type);if(type==='close')props.open=false}},'actual-import-dialog-script')
+  let pickerClicks=0
+  namespace.__fileInput({click(){pickerClicks++}})
   const flush=async()=>{await tick();v.flush();await tick()}
   return {props,requests,disposed,emissions,stamp,guide,flush,
+    pickerCount:()=>pickerClicks,
+    setBatch(file){props.open=true;props.file=file;v.flush()},
     select(file){props.file=file;props.open=true;v.flush()},
     choose(file){namespace.__calls.pick({target:{files:[file],value:'selected'}});v.flush()},
     calls:namespace.__calls,state:()=>namespace.__state(),

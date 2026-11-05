@@ -6,7 +6,13 @@ const file = name => ({name})
 const svg = type => new File(['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 4"><rect width="8" height="4" fill="red"/></svg>'],'drawing.svg',{type})
 const png = () => new File(['controlled bytes'],'picture.png',{type:'image/png'})
 
-if(process.env.MOZAIC_IMPORT_ORIGINAL==='1') {
+if(process.env.MOZAIC_IMPORT_BATCH_ORIGINAL==='1') {
+  test('original synchronous import action opens a picker during a parent file-drop update',async()=>{
+    const f=await dialogFixture();f.setBatch(file('drop.svg'))
+    assert.equal(f.pickerCount(),1);assert.equal(f.requests.length,1)
+    f.resolve(0,'drop');await f.flush();f.unmount()
+  })
+} else if(process.env.MOZAIC_IMPORT_ORIGINAL==='1') {
   test('original older image success replaces the newer selection',async()=>{
     const f=await dialogFixture();f.select(file('a'));f.choose(file('b'));f.resolve(1,'b');await f.flush();f.resolve(0,'a');await f.flush()
     assert.equal(f.state().bitmap.id,'a');assert.equal(f.state().name,'a');f.unmount()
@@ -116,5 +122,10 @@ if(process.env.MOZAIC_IMPORT_ORIGINAL==='1') {
   test('image invalid finite dimensions release the current source',async()=>{
     const f=await imageFixture(),pending=f.module.decode(png());const rejected=assert.rejects(pending,/no size/)
     await f.flush();f.ready(undefined,Infinity,4);await rejected;assert.equal(f.urls.size,0);assert.equal(f.bitmaps.length,0)
+  })
+  test('import defers its action until both parent open and file props settle',async()=>{
+    const f=await dialogFixture();f.setBatch(file('drop.svg'));await f.flush()
+    assert.equal(f.pickerCount(),0);assert.equal(f.requests.length,1)
+    f.resolve(0,'drop');await f.flush();assert.equal(f.state().bitmap.id,'drop');f.unmount()
   })
 }
