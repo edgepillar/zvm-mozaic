@@ -52,3 +52,5 @@ Current selected-pixel/history publication is described in [PIXEL_DETAILS.md](PI
 View input, transient marks and deferred navigation have their own lifetime boundaries; see [View ownership](VIEW_CONTEXT.md).
 
 Image reads and decoded resource ownership are described in [IMAGE_CONTEXT.md](IMAGE_CONTEXT.md).
+
+Queued native close notifications and the current controlled dialog are described in [MODAL_CONTEXT.md](MODAL_CONTEXT.md).

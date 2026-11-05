@@ -138,3 +138,6 @@ export async function imageFixture() {
     bitmap(i=bitmaps.length-1){bitmaps[i].resolve(bitmaps[i].result);return bitmaps[i].result},
     timersRun(){timers.splice(0).forEach(timer=>timer.fn())}}
 }
+
+// Reuse these declared memory capabilities in the actual modal-script controls.
+export {vuePorts, moduleWithPorts}

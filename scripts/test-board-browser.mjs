@@ -30,6 +30,7 @@ const routerPaint = {address: R, blockNumber: '0x9', transactionHash: TX, transa
 const DETAIL_CASES = ['late-history-details','late-router-details','live-details','history-unavailable-details','unavailable-details']
 const GESTURE_CASES = ["pointer-cancel", "held-pointer-context", "pinch-spray", "deferred-route", "view-dimensions"]
 const IMAGE_CASES = ['image-stamp', 'image-close', 'image-replace-guide', 'image-close-pending', 'image-drop']
+const MODAL_CASES = ['image-queued-close', 'image-native-escape', 'node-modal-queued-close']
 function detailPaint({block = 9, painter = ARTIST, transaction = TX, rgb = 0x112233} = {}) {
   const packed = '0x' + DETAIL_INDEX.toString(16).padStart(6, '0') + rgb.toString(16).padStart(6, '0')
   return {...canvasPaint, blockNumber: hex(block), transactionHash: transaction,
@@ -339,6 +340,47 @@ async function onlyImageURL(fixture, expected = 1) {
 }
 const boardCentreRGB = page => page.$eval('[data-testid="board"]', canvas => Array.from(canvas.getContext('2d').getImageData(Math.floor(canvas.width/2),Math.floor(canvas.height/2),1,1).data).slice(0,3))
 
+
+// Observe the real close event without replacing a product or platform API.
+// Product DOM clicks and a microtask checkpoint reopen the same native element
+// before the queued event can run as a later browser task.
+async function reopenBeforeNativeClose(page, kind) {
+  return page.evaluate(async selected => {
+    const dialog=document.querySelector('dialog[open]')
+    if(!dialog)throw new Error('The actual current native dialog is unavailable')
+    let listener, timer
+    const event=new Promise((resolve,reject)=>{
+      listener=value=>resolve({trusted:value.isTrusted,targetMatches:value.target===dialog,openAtEvent:dialog.open})
+      dialog.addEventListener('close',listener,{once:true})
+      timer=setTimeout(()=>reject(new Error('The real queued native close event was not observed')),5000)
+    })
+    try {
+      dialog.querySelector('button[title="Close"]').click()
+      await Promise.resolve()
+      const closedBeforeReopen=!dialog.open
+      if(!closedBeforeReopen)throw new Error('The product had not closed its native dialog at the declared microtask boundary')
+      let file=null
+      if(selected==='image') {
+        const svg='<svg xmlns="http://www.w3.org/2000/svg" width="4" height="2" viewBox="0 0 4 2"><rect width="4" height="2" fill="blue"/></svg>'
+        const image=new File([svg],'reopened.svg',{type:''}),transfer=new DataTransfer();transfer.items.add(image)
+        document.querySelector('[data-testid="board"]').dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:transfer}))
+        file={name:image.name,type:image.type,bytes:image.size}
+      } else {
+        document.querySelector('[data-testid="node-picker"]').click()
+      }
+      await Promise.resolve()
+      const reopenedBeforeEvent=dialog.open
+      if(!reopenedBeforeEvent)throw new Error('The same product dialog did not reopen before the native close event')
+      const actual=await event
+      await Promise.resolve()
+      return {sameElement:dialog===document.querySelector('dialog[open]'),closedBeforeReopen,
+        reopenedBeforeEvent,openAfterEvent:dialog.open,nativeEvent:actual,controlledFile:file,observationCapMs:5000}
+    } finally {
+      clearTimeout(timer);dialog.removeEventListener('close',listener)
+    }
+  },kind)
+}
+
 async function failureDetail(error, state, page) {
   const observed = await Promise.race([
     page.evaluate(() => ({visibility: document.visibilityState,
@@ -356,7 +398,7 @@ async function failureDetail(error, state, page) {
 try {
   browser = await puppeteer.launch({executablePath, headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--no-first-run']})
   const browserVersion = await browser.version()
-  for (const name of ['old-head', 'old-totals', 'late-router', 'unavailable', 'old-chunk', 'old-history', 'old-log-error', 'canvas-switch', 'draft-context', 'draft-fast-return', 'draft-storage-reload', 'legacy-storage-migration', 'late-history-details', 'late-router-details', 'live-details', 'history-unavailable-details', 'unavailable-details', 'pointer-cancel', 'held-pointer-context', 'pinch-spray', 'deferred-route', 'view-dimensions', 'image-stamp', 'image-close', 'image-replace-guide', 'image-close-pending', 'image-drop']) {
+  for (const name of ['old-head', 'old-totals', 'late-router', 'unavailable', 'old-chunk', 'old-history', 'old-log-error', 'canvas-switch', 'draft-context', 'draft-fast-return', 'draft-storage-reload', 'legacy-storage-migration', 'late-history-details', 'late-router-details', 'live-details', 'history-unavailable-details', 'unavailable-details', 'pointer-cancel', 'held-pointer-context', 'pinch-spray', 'deferred-route', 'view-dimensions', 'image-stamp', 'image-close', 'image-replace-guide', 'image-close-pending', 'image-drop', 'image-queued-close', 'image-native-escape', 'node-modal-queued-close']) {
     active = {name, held: new Map(), calls: [], contractCalls: []}; const state = active
     console.log('MOZAIC-BOARD-BROWSER-START ' + JSON.stringify({case: name, source}))
     const context = await browser.createBrowserContext(), page = await context.newPage()
@@ -379,7 +421,7 @@ try {
       if (name === 'draft-context') await keeper.lock()
       if (name === 'legacy-storage-migration') {legacyValue = Buffer.from(draftBytes(1, 0xff0000)).toString('hex'); await keeper.legacy(draftKey(13370), legacyValue); await keeper.lock('readonly')}
     }
-    const query = new URLSearchParams({rpc: origin + '/node/a/rpc', contract: A, x: (DETAIL_CASES.includes(name) || GESTURE_CASES.includes(name) || IMAGE_CASES.includes(name)) ? '500' : '0', y: (DETAIL_CASES.includes(name) || GESTURE_CASES.includes(name) || IMAGE_CASES.includes(name)) ? '500' : '0', z: '8', ...(['late-router', 'late-router-details'].includes(name) ? {router: R} : {})})
+    const query = new URLSearchParams({rpc: origin + '/node/a/rpc', contract: A, x: (DETAIL_CASES.includes(name) || GESTURE_CASES.includes(name) || IMAGE_CASES.includes(name) || MODAL_CASES.includes(name)) ? '500' : '0', y: (DETAIL_CASES.includes(name) || GESTURE_CASES.includes(name) || IMAGE_CASES.includes(name) || MODAL_CASES.includes(name)) ? '500' : '0', z: '8', ...(['late-router', 'late-router-details'].includes(name) ? {router: R} : {})})
     // Opening the keeper tab can background the product. Its real visibility
     // and animation-frame polling must match the foreground UI under test.
     await page.bringToFront()
@@ -672,6 +714,57 @@ try {
       results.push({case:name,actualNativeFileBlobAndBoardDropEvent:true,actualParentOpenAndFilePropsUsed:true,
         actualDroppedSVGDecodedInActualDialog:true,actualUnwantedNativeFileChoosers:0,
         actualFileChooserObservationWindowMs:1500,actualRangeKeyboardUsed:true,actualDraftPixels:0,controlledFile:file,pass:true})
+
+    } else if (name === 'image-queued-close') {
+      state.phase = 'actual image close and reopen before its queued native close event'
+      const f=await imageReady(page);await chooseImage(page,{name:'first-open.svg'});await smallImage(page)
+      const first=await onlyImageURL(f)
+      const transition=await reopenBeforeNativeClose(page,'image')
+      assert.equal(transition.closedBeforeReopen,true);assert.equal(transition.reopenedBeforeEvent,true)
+      assert.equal(transition.nativeEvent.trusted,true);assert.equal(transition.nativeEvent.targetMatches,true)
+      assert.equal(transition.nativeEvent.openAtEvent,true);assert.equal(transition.openAfterEvent,true);assert.equal(transition.sameElement,true)
+      await smallImage(page);const current=await onlyImageURL(f,2)
+      assert.notEqual(first,current);assert.equal(await canReadImageURL(page,first),false);assert.equal(await canReadImageURL(page,current),true)
+      await page.click('dialog[open] button[title="Close"]');await page.waitForFunction(()=>!document.querySelector('dialog[open]'))
+      assert.equal(await canReadImageURL(page,current),false);await badge(page,0)
+      results.push({case:name,actualProductDOMCloseAndBoardDrop:true,actualSameNativeElementReopenedBeforeQueuedClose:true,
+        actualTrustedQueuedCloseObserved:true,actualNewOpeningAndDecodedPreviewSurviveOldEvent:true,
+        actualPreviousURLReleasedAndCurrentURLRetained:true,actualCurrentURLReleasedOnlyAfterCurrentClose:true,
+        actualNativeDialogAndProductAPIsUnmodified:true,actualDraftPixels:0,transition,pass:true})
+    } else if (name === 'image-native-escape') {
+      state.phase = 'current native Escape still closes the image dialog and releases its source'
+      const f=await imageReady(page);await chooseImage(page,{name:'escape.svg'});await smallImage(page)
+      const first=await onlyImageURL(f);assert.equal(await canReadImageURL(page,first),true)
+      await page.keyboard.press('Escape');await page.waitForFunction(()=>!document.querySelector('dialog[open]'))
+      assert.equal(await canReadImageURL(page,first),false)
+      const file=await page.evaluate(()=>{
+        const svg='<svg xmlns="http://www.w3.org/2000/svg" width="4" height="2" viewBox="0 0 4 2"><rect width="4" height="2" fill="green"/></svg>'
+        const image=new File([svg],'after-escape.svg',{type:''}),transfer=new DataTransfer();transfer.items.add(image)
+        document.querySelector('[data-testid="board"]').dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:transfer}))
+        return {name:image.name,type:image.type,bytes:image.size}
+      })
+      await smallImage(page);const current=await onlyImageURL(f,2);assert.equal(await canReadImageURL(page,current),true)
+      await page.click('dialog[open] button[title="Close"]');await page.waitForFunction(()=>!document.querySelector('dialog[open]'))
+      assert.equal(await canReadImageURL(page,current),false);await badge(page,0)
+      results.push({case:name,actualNativeEscapeKey:true,actualCurrentEscapeClosesDialog:true,actualEscapeReleasesNativeSVGURL:true,
+        actualFreshDropAndNativePreviewRecoverAfterEscape:true,actualNextCurrentCloseStillReleasesSource:true,
+        actualNativeDialogAndProductAPIsUnmodified:true,actualDraftPixels:0,controlledFile:file,pass:true})
+    } else if (name === 'node-modal-queued-close') {
+      state.phase = 'another actual modal consumer retains its new opening across an old native close event'
+      await waitStats(page,5,6);await quiet(page);await badge(page,0)
+      await page.click('[data-testid="node-picker"]');await page.waitForSelector('#rpc-url',{visible:true})
+      const before=await page.$eval('#rpc-url',input=>input.value)
+      const transition=await reopenBeforeNativeClose(page,'node')
+      assert.equal(transition.closedBeforeReopen,true);assert.equal(transition.reopenedBeforeEvent,true)
+      assert.equal(transition.nativeEvent.trusted,true);assert.equal(transition.nativeEvent.targetMatches,true)
+      assert.equal(transition.nativeEvent.openAtEvent,true);assert.equal(transition.openAfterEvent,true);assert.equal(transition.sameElement,true)
+      await page.waitForSelector('#rpc-url',{visible:true});assert.equal(await page.$eval('#rpc-url',input=>input.value),before)
+      await page.keyboard.press('Escape');await page.waitForFunction(()=>!document.querySelector('dialog[open]'))
+      await waitStats(page,5,6);await badge(page,0)
+      results.push({case:name,actualNodePickerModalConsumer:true,actualProductDOMCloseAndNodePickerReopen:true,
+        actualSameNativeElementReopenedBeforeQueuedClose:true,actualTrustedQueuedCloseObserved:true,
+        actualCurrentNativeEscapeStillCloses:true,actualNodeInputAndCurrentBoardPreserved:true,
+        actualNativeDialogAndProductAPIsUnmodified:true,actualDraftPixels:0,transition,pass:true})
     } else {
       await waitStats(page, 5, 6); await quiet(page); await changeNode(page, '')
       await page.waitForFunction(() => {const rows = Array.from(document.querySelectorAll('.stats-body b'), node => node.textContent.trim()); return rows[0] === '-' && rows[2] === '-'})
@@ -694,14 +787,14 @@ try {
       await context.close()
     }
   }
-  console.log('MOZAIC-BOARD-BROWSER-AGGREGATE ' + JSON.stringify({source, attempted: 27, passed: results.length, failures}))
+  console.log('MOZAIC-BOARD-BROWSER-AGGREGATE ' + JSON.stringify({source, attempted: 30, passed: results.length, failures}))
   assert.deepEqual(failures, [], 'All independent production scenarios must pass')
-  assert.equal(results.length, 27); assert.deepEqual(errors, []); assert.deepEqual(unexpected, [])
+  assert.equal(results.length, 30); assert.deepEqual(errors, []); assert.deepEqual(unexpected, [])
   assert.ok(delivered.has('index.html') && Array.from(delivered.keys()).some(name => name.endsWith('.js')))
-  console.log('MOZAIC-BOARD-BROWSER-SUMMARY ' + JSON.stringify({schema: 1, source, cases: 27, passed: 27, failed: 0,
+  console.log('MOZAIC-BOARD-BROWSER-SUMMARY ' + JSON.stringify({schema: 1, source, cases: 30, passed: 30, failed: 0,
     browserVersion, nodeVersion: process.version, platform: process.platform, architecture: process.arch,
     actualProductPageVisibility: 'visible', independentScenarioFailuresCollectedBeforeFinalVerdict: true,
-    actualProductionEntryRoutes: ['canvas', 'gallery'], actualDraftPixelsPreserved: 1, actualIndexedDBAndLegacyStorage: true, nativeStorageLockCases: 3, actualDraftReloadCases: 1, actualPixelDetailCases: 5, stationaryPointerDetailCases: 2, actualGestureAndNavigationCases: 5, actualTouchInputCases: 3, actualRouteTimerBoundaryCases: 1, actualSmallCanvasCases: 1, actualImageImportCases: 5, actualNativeFileDropCases: 1, actualNativePNGPlacementCases: 1, actualNativeSVGResourceCases: 2, actualExplicitObjectURLLifetimeCases: 3, actualPendingImportCloseCases: 1,
+    actualProductionEntryRoutes: ['canvas', 'gallery'], actualDraftPixelsPreserved: 1, actualIndexedDBAndLegacyStorage: true, nativeStorageLockCases: 3, actualDraftReloadCases: 1, actualPixelDetailCases: 5, stationaryPointerDetailCases: 2, actualGestureAndNavigationCases: 5, actualTouchInputCases: 3, actualRouteTimerBoundaryCases: 1, actualSmallCanvasCases: 1, actualImageImportCases: 7, actualNativeFileDropCases: 3, actualNativeModalCases: 3, actualQueuedModalCloseCases: 2, actualNativeEscapeCases: 2, actualNativePNGPlacementCases: 1, actualNativeSVGResourceCases: 4, actualExplicitObjectURLLifetimeCases: 5, actualPendingImportCloseCases: 1,
     servedBuildFiles: Object.fromEntries(Array.from(delivered).sort()), unexpectedExternalRequests: 0, pageOrFixtureErrors: 0,
     walletProvidersConnected: 0, publicNetworkOrRealNoMExecution: false, sourceTestHooksOrProductModuleReplacements: 0}))
 } catch (error) {

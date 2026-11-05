@@ -20,6 +20,14 @@ watch(
   },
 )
 
+// Native close events are queued. The same element can already belong to a
+// new opening when an earlier close notification arrives.
+function nativeClosed() {
+  const dialog = el.value
+  if (!props.open || !dialog || dialog.open) return
+  emit('close')
+}
+
 onBeforeUnmount(() => el.value?.open && el.value.close())
 </script>
 
@@ -28,7 +36,7 @@ onBeforeUnmount(() => el.value?.open && el.value.close())
     ref="el"
     class="mozaic-dialog"
     :style="{width: `${width ?? 420}px`}"
-    @close="emit('close')"
+    @close="nativeClosed"
     @click.self="emit('close')"
   >
     <div class="flex items-center justify-between gap-3 px-4 py-3 border-b border-line">

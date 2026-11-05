@@ -38,10 +38,14 @@ bitmap, URL, canvas, clock and Vue ports. They do not compile Vue, decode an
 image in a real browser or execute a wallet, SDK, storage or node. Six original
 behaviours are reproduced; 20 candidate controls cover selection, late errors,
 close/unmount, normal placement, cancellation and resource disposal. The 164
-previous module/script controls are retained.
+previous module/script controls are retained. Eight shared-modal controls are
+added; see [Native modal ownership](MODAL_CONTEXT.md).
 
 The required production witness retains all 22 prior scenarios and adds five
-image cases, including the actual parent file-drop path. It uses the actual compiled Vue/DOM, native File/Blob/DataTransfer,
+image cases, including the actual parent file-drop path. Three further native
+modal cases cover close/reopen ownership and current Escape, including two image
+paths and the node-picker consumer. The witness uses the actual compiled Vue/DOM,
+native File/Blob/DataTransfer,
 PNG/SVG decoders, file-input change handlers, range keyboard and placement UI.
 It opens and cancels the native file chooser; controlled tiny files are assigned
 to the actual input through DataTransfer. This does not qualify OS file reading
@@ -57,8 +61,8 @@ dialog in one page task through
 Every independent scenario is attempted before the verdict, with source,
 browser/platform and delivered production-file digests retained.
 
-Current-source hosted CI is still required for 184 module/script controls,
-27 native Chrome scenarios, all 35 original isolated contract events, fresh
+Current-source hosted CI is still required for 192 module/script controls,
+30 native Chrome scenarios, all 35 original isolated contract events, fresh
 contract/ABI drift checks, TypeScript and production build. Wider format/size,
 browser/platform, concurrent modal/tab/crash, real wallet/provider/NoM and
 maintainer/operator/release requirements remain open. All original roadmap
