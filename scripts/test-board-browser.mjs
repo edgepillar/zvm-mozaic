@@ -29,6 +29,7 @@ const routerPaint = {address: R, blockNumber: '0x9', transactionHash: TX, transa
   topics: [topic('PaintedBy(address,address,uint256)'), addressTopic(ARTIST), addressTopic(ARTIST)], data: encodeAbiParameters([{type: 'uint256'}], [1n])}
 const DETAIL_CASES = ['late-history-details','late-router-details','live-details','history-unavailable-details','unavailable-details']
 const GESTURE_CASES = ["pointer-cancel", "held-pointer-context", "pinch-spray", "deferred-route", "view-dimensions"]
+const IMAGE_CASES = ['image-stamp', 'image-close', 'image-replace-guide', 'image-close-pending']
 function detailPaint({block = 9, painter = ARTIST, transaction = TX, rgb = 0x112233} = {}) {
   const packed = '0x' + DETAIL_INDEX.toString(16).padStart(6, '0') + rgb.toString(16).padStart(6, '0')
   return {...canvasPaint, blockNumber: hex(block), transactionHash: transaction,
@@ -282,6 +283,62 @@ async function gestureTool(page, key, large = false) {
   await page.waitForFunction(() => getComputedStyle(document.querySelector('[data-testid="board"]')).cursor === 'crosshair')
 }
 
+
+async function showImageImport(page) {
+  const chooser = page.waitForFileChooser()
+  await page.click('[data-testid="import"]')
+  await (await chooser).cancel()
+  await page.waitForSelector('dialog[open] [data-testid="image-input"]')
+}
+async function imageReady(page) {
+  await waitStats(page, 5, 6); await quiet(page); await badge(page, 0)
+  const session = await page.createCDPSession(), urls = new Set()
+  await session.send('Network.enable')
+  session.on('Network.requestWillBeSent', event => {
+    if (event.request.url.startsWith('blob:' + origin + '/')) urls.add(event.request.url)
+  })
+  await showImageImport(page)
+  return {session, urls}
+}
+async function chooseImage(page, {name = 'picture.svg', colour = '#ff0000', png = false, closeNow = false} = {}) {
+  const actual = await page.evaluate(async args => {
+    let file
+    if (args.png) {
+      const canvas = document.createElement('canvas'); canvas.width = 4; canvas.height = 2
+      const context = canvas.getContext('2d'); context.fillStyle = args.colour; context.fillRect(0,0,4,2)
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'))
+      if (!blob) throw new Error('Native PNG creation failed')
+      file = new File([blob], args.name, {type: 'image/png'})
+    } else {
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 2" width="4" height="2"><rect width="4" height="2" fill="${args.colour}"/></svg>`
+      file = new File([svg], args.name, {type: ''})
+    }
+    const input = document.querySelector('dialog[open] [data-testid="image-input"]')
+    if (!input) throw new Error('The actual import file input is unavailable')
+    const transfer = new DataTransfer(); transfer.items.add(file); input.files = transfer.files
+    input.dispatchEvent(new Event('change', {bubbles: true}))
+    // A native decode awaits a promise. Closing in this same task precedes
+    // its publication without replacing Image.decode or any product API.
+    if (args.closeNow) document.querySelector('dialog[open] button[title="Close"]').click()
+    return {name: file.name, type: file.type, bytes: file.size}
+  }, {name, colour, png, closeNow})
+  assert.ok(actual.bytes > 0 && actual.bytes <= 1024)
+  return actual
+}
+async function smallImage(page) {
+  await page.waitForSelector('dialog[open] [data-testid="as-stamp"]', {visible: true})
+  await page.focus('[data-testid="image-width"]'); await page.keyboard.press('Home')
+  await page.waitForFunction(() => document.querySelector('dialog[open]')?.textContent.includes('4 x 2 px'))
+}
+const canReadImageURL = (page, url) => page.evaluate(async value => {
+  try {return (await fetch(value)).ok} catch {return false}
+}, url)
+async function onlyImageURL(fixture, expected = 1) {
+  await until(() => fixture.urls.size === expected, 'The real native image request must expose its object URL through CDP')
+  return Array.from(fixture.urls).at(-1)
+}
+const boardCentreRGB = page => page.$eval('[data-testid="board"]', canvas => Array.from(canvas.getContext('2d').getImageData(Math.floor(canvas.width/2),Math.floor(canvas.height/2),1,1).data).slice(0,3))
+
 async function failureDetail(error, state, page) {
   const observed = await Promise.race([
     page.evaluate(() => ({visibility: document.visibilityState,
@@ -299,7 +356,7 @@ async function failureDetail(error, state, page) {
 try {
   browser = await puppeteer.launch({executablePath, headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--no-first-run']})
   const browserVersion = await browser.version()
-  for (const name of ['old-head', 'old-totals', 'late-router', 'unavailable', 'old-chunk', 'old-history', 'old-log-error', 'canvas-switch', 'draft-context', 'draft-fast-return', 'draft-storage-reload', 'legacy-storage-migration', 'late-history-details', 'late-router-details', 'live-details', 'history-unavailable-details', 'unavailable-details', 'pointer-cancel', 'held-pointer-context', 'pinch-spray', 'deferred-route', 'view-dimensions']) {
+  for (const name of ['old-head', 'old-totals', 'late-router', 'unavailable', 'old-chunk', 'old-history', 'old-log-error', 'canvas-switch', 'draft-context', 'draft-fast-return', 'draft-storage-reload', 'legacy-storage-migration', 'late-history-details', 'late-router-details', 'live-details', 'history-unavailable-details', 'unavailable-details', 'pointer-cancel', 'held-pointer-context', 'pinch-spray', 'deferred-route', 'view-dimensions', 'image-stamp', 'image-close', 'image-replace-guide', 'image-close-pending']) {
     active = {name, held: new Map(), calls: [], contractCalls: []}; const state = active
     console.log('MOZAIC-BOARD-BROWSER-START ' + JSON.stringify({case: name, source}))
     const context = await browser.createBrowserContext(), page = await context.newPage()
@@ -322,7 +379,7 @@ try {
       if (name === 'draft-context') await keeper.lock()
       if (name === 'legacy-storage-migration') {legacyValue = Buffer.from(draftBytes(1, 0xff0000)).toString('hex'); await keeper.legacy(draftKey(13370), legacyValue); await keeper.lock('readonly')}
     }
-    const query = new URLSearchParams({rpc: origin + '/node/a/rpc', contract: A, x: (DETAIL_CASES.includes(name) || GESTURE_CASES.includes(name)) ? '500' : '0', y: (DETAIL_CASES.includes(name) || GESTURE_CASES.includes(name)) ? '500' : '0', z: '8', ...(['late-router', 'late-router-details'].includes(name) ? {router: R} : {})})
+    const query = new URLSearchParams({rpc: origin + '/node/a/rpc', contract: A, x: (DETAIL_CASES.includes(name) || GESTURE_CASES.includes(name) || IMAGE_CASES.includes(name)) ? '500' : '0', y: (DETAIL_CASES.includes(name) || GESTURE_CASES.includes(name) || IMAGE_CASES.includes(name)) ? '500' : '0', z: '8', ...(['late-router', 'late-router-details'].includes(name) ? {router: R} : {})})
     // Opening the keeper tab can background the product. Its real visibility
     // and animation-frame polling must match the foreground UI under test.
     await page.bringToFront()
@@ -543,6 +600,57 @@ try {
       results.push({case: name, actualNodePickerUsed: true, controlledNewCanvasDimensions: [40,40], currentSnapshotChunks: chunks,
         actualRenderedCornerRGB: pixels.corners, actualUncoveredBackgroundRGB: pixels.uncoveredBackground,
         currentCanvasStillCoversTheBoard: true, pass: true})
+
+    } else if (name === 'image-stamp') {
+      state.phase = 'actual PNG input, resource release and stamp placement'
+      const f = await imageReady(page)
+      const file = await chooseImage(page, {name: 'stamp.png', png: true}); await smallImage(page)
+      const url = await onlyImageURL(f); assert.equal(await canReadImageURL(page,url), false)
+      await page.click('[data-testid="as-stamp"]'); await page.waitForFunction(() => !document.querySelector('dialog[open]'))
+      const box = await (await page.$('[data-testid="board"]')).boundingBox(); assert.ok(box)
+      await page.mouse.click(box.x+box.width/2,box.y+box.height/2); await badge(page,8)
+      results.push({case:name,actualNativePNGFileAndFileInputChange:true,actualCancelledNativeFileChooser:true,
+        actualRangeKeyboardUsed:true,actualScaledStampDimensions:[4,2],actualDraftPixels:8,
+        actualRasterObjectURLReleasedAfterDecode:true,actualPlacedCanvasSurvivesDecodedSourceDisposal:true,
+        controlledFile:file,observedObjectURLSHA256:createHash('sha256').update(url).digest('hex'),pass:true})
+    } else if (name === 'image-close') {
+      state.phase = 'actual SVG import close and explicit resource lifetime'
+      const f=await imageReady(page); const file=await chooseImage(page); await smallImage(page)
+      const url=await onlyImageURL(f); assert.equal(await canReadImageURL(page,url),true)
+      await page.click('dialog[open] button[title="Close"]'); await page.waitForFunction(() => !document.querySelector('dialog[open]'))
+      assert.equal(await canReadImageURL(page,url),false)
+      await showImageImport(page); assert.equal(await page.$('dialog[open] [data-testid="as-stamp"]'),null)
+      await page.click('dialog[open] button[title="Close"]'); await badge(page,0)
+      results.push({case:name,actualMIMEEmptySVGAndNativeDecoder:true,actualNativeObjectURLReadableBeforeClose:true,
+        actualNativeObjectURLUnreadableAfterClose:true,actualReopenedDialogHasNoOldPreview:true,
+        actualDraftPixels:0,controlledFile:file,observedObjectURLSHA256:createHash('sha256').update(url).digest('hex'),pass:true})
+    } else if (name === 'image-replace-guide') {
+      state.phase = 'actual SVG replacement, guide raster and resource release'
+      const f=await imageReady(page); await chooseImage(page,{name:'first.svg'}); await smallImage(page)
+      const first=await onlyImageURL(f); assert.equal(await canReadImageURL(page,first),true)
+      await chooseImage(page,{name:'second.svg',colour:'#0000ff'}); await smallImage(page)
+      const second=await onlyImageURL(f,2); assert.notEqual(first,second)
+      assert.equal(await canReadImageURL(page,first),false); assert.equal(await canReadImageURL(page,second),true)
+      const before=await boardCentreRGB(page)
+      await page.evaluate(() => {
+        const button=Array.from(document.querySelectorAll('dialog[open] button')).find(node => node.textContent.includes('Pin as a guide'))
+        if(!button)throw new Error('The actual guide action is unavailable');button.click()
+      })
+      await page.waitForFunction(() => !document.querySelector('dialog[open]')); await quietExceptHeld(page)
+      const after=await boardCentreRGB(page);assert.notDeepEqual(after,before);assert.ok(after[2]>after[0] && after[2]>after[1])
+      assert.equal(await canReadImageURL(page,second),false);await badge(page,0)
+      results.push({case:name,actualTwoSVGFileInputSelections:true,actualReplacedObjectURLReleased:true,
+        actualCurrentObjectURLReadableBeforePlacement:true,actualCurrentObjectURLReleasedAfterGuidePlacement:true,
+        actualGuideStillRenderedAfterSourceDisposal:true,actualRenderedRGBBefore:before,actualRenderedRGBAfter:after,
+        actualDraftPixels:0,observedDistinctObjectURLs:f.urls.size,pass:true})
+    } else if (name === 'image-close-pending') {
+      state.phase = 'same-task actual file change and close before decode publication'
+      await imageReady(page);const file=await chooseImage(page,{closeNow:true})
+      await page.waitForFunction(() => !document.querySelector('dialog[open]'));await later(250)
+      await showImageImport(page);assert.equal(await page.$('dialog[open] [data-testid="as-stamp"]'),null)
+      await page.click('dialog[open] button[title="Close"]');await badge(page,0)
+      results.push({case:name,actualFileInputChangeAndCloseInOneTask:true,actualImageAndProductAPIsUnmodified:true,
+        actualReopenedDialogRejectsLatePreview:true,actualDraftPixels:0,controlledFile:file,pass:true})
     } else {
       await waitStats(page, 5, 6); await quiet(page); await changeNode(page, '')
       await page.waitForFunction(() => {const rows = Array.from(document.querySelectorAll('.stats-body b'), node => node.textContent.trim()); return rows[0] === '-' && rows[2] === '-'})
@@ -565,14 +673,14 @@ try {
       await context.close()
     }
   }
-  console.log('MOZAIC-BOARD-BROWSER-AGGREGATE ' + JSON.stringify({source, attempted: 22, passed: results.length, failures}))
+  console.log('MOZAIC-BOARD-BROWSER-AGGREGATE ' + JSON.stringify({source, attempted: 26, passed: results.length, failures}))
   assert.deepEqual(failures, [], 'All independent production scenarios must pass')
-  assert.equal(results.length, 22); assert.deepEqual(errors, []); assert.deepEqual(unexpected, [])
+  assert.equal(results.length, 26); assert.deepEqual(errors, []); assert.deepEqual(unexpected, [])
   assert.ok(delivered.has('index.html') && Array.from(delivered.keys()).some(name => name.endsWith('.js')))
-  console.log('MOZAIC-BOARD-BROWSER-SUMMARY ' + JSON.stringify({schema: 1, source, cases: 22, passed: 22, failed: 0,
+  console.log('MOZAIC-BOARD-BROWSER-SUMMARY ' + JSON.stringify({schema: 1, source, cases: 26, passed: 26, failed: 0,
     browserVersion, nodeVersion: process.version, platform: process.platform, architecture: process.arch,
     actualProductPageVisibility: 'visible', independentScenarioFailuresCollectedBeforeFinalVerdict: true,
-    actualProductionEntryRoutes: ['canvas', 'gallery'], actualDraftPixelsPreserved: 1, actualIndexedDBAndLegacyStorage: true, nativeStorageLockCases: 3, actualDraftReloadCases: 1, actualPixelDetailCases: 5, stationaryPointerDetailCases: 2, actualGestureAndNavigationCases: 5, actualTouchInputCases: 3, actualRouteTimerBoundaryCases: 1, actualSmallCanvasCases: 1,
+    actualProductionEntryRoutes: ['canvas', 'gallery'], actualDraftPixelsPreserved: 1, actualIndexedDBAndLegacyStorage: true, nativeStorageLockCases: 3, actualDraftReloadCases: 1, actualPixelDetailCases: 5, stationaryPointerDetailCases: 2, actualGestureAndNavigationCases: 5, actualTouchInputCases: 3, actualRouteTimerBoundaryCases: 1, actualSmallCanvasCases: 1, actualImageImportCases: 4, actualNativePNGPlacementCases: 1, actualNativeSVGResourceCases: 2, actualExplicitObjectURLLifetimeCases: 3, actualPendingImportCloseCases: 1,
     servedBuildFiles: Object.fromEntries(Array.from(delivered).sort()), unexpectedExternalRequests: 0, pageOrFixtureErrors: 0,
     walletProvidersConnected: 0, publicNetworkOrRealNoMExecution: false, sourceTestHooksOrProductModuleReplacements: 0}))
 } catch (error) {

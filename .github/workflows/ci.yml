@@ -34,7 +34,7 @@ jobs:
           cache: npm
 
       - run: npm ci
-      - name: Check shipped endpoint canvas router and heartbeat context
+      - name: Check shipped modules views and image ownership
         run: npm run test:context
       - run: npm run contract:build
       - run: git diff --exit-code -- contracts/Mozaic.json contracts/MozaicRouter.json src/core/abi.ts
@@ -42,5 +42,5 @@ jobs:
       - run: cp .env.example .env
       - run: npm run typecheck
       - run: npm run build
-      - name: Check production canvas storage details gestures and navigation
+      - name: Check production canvas storage details gestures navigation and images
         run: npm run test:board-browser

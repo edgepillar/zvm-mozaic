@@ -2,8 +2,8 @@
 // Bringing a picture in: choose its width in canvas pixels, see what that
 // costs, then either hold it as a stamp to click into the draft, or pin it
 // over the canvas as a guide to trace.
-import {computed, ref, shallowRef, watch} from 'vue'
-import {decode, guide, pixelsOf, scaled, stamp, type Decoded, type Picture} from '../core/image'
+import {computed, onBeforeUnmount, ref, shallowRef, watch} from 'vue'
+import {decode, disposeDecoded, guide, pixelsOf, scaled, stamp, type Decoded, type Picture} from '../core/image'
 import {endpoint} from '../core/endpoint'
 import {number, units} from '../core/format'
 import Modal from './Modal.vue'
@@ -19,29 +19,60 @@ const error = ref('')
 const input = ref<HTMLInputElement | null>(null)
 const previewEl = ref<HTMLCanvasElement | null>(null)
 
-async function load(f: File) {
+let generation = 0
+let disposed = false
+let reading: AbortController | null = null
+const owns = (ticket: number) => !disposed && props.open && ticket === generation
+
+function retire() {
+  generation++
+  reading?.abort()
+  reading = null
+  const previous = bitmap.value
+  bitmap.value = null
+  disposeDecoded(previous)
+  name.value = ''
+  width.value = 64
   error.value = ''
+}
+
+async function load(f: File) {
+  if (disposed || !props.open) return
+  retire()
+  const ticket = generation
+  const request = new AbortController()
+  reading = request
   try {
-    bitmap.value = await decode(f)
+    const next = await decode(f, request.signal)
+    if (!owns(ticket)) {disposeDecoded(next); return}
+    bitmap.value = next
+    if (!owns(ticket)) return
     name.value = f.name || 'Pasted image'
-    // Start small: a photo at its own size would be a million pixels and a hundred ZNN.
-    width.value = Math.min(bitmap.value.width, 128)
+    if (!owns(ticket)) return
+    // A full-size photo can be a million pixels; start with a small stamp.
+    width.value = Math.min(next.width, 128)
   } catch (err: any) {
-    error.value = err?.message ?? 'That image could not be read.'
+    if (!owns(ticket)) return
+    const previous = bitmap.value
     bitmap.value = null
+    disposeDecoded(previous)
+    if (!owns(ticket)) return
+    error.value = err?.message ?? 'That image could not be read.'
+  } finally {
+    if (reading === request) reading = null
   }
 }
 
 watch(
-  () => props.file,
-  (f) => f && load(f),
-)
-watch(
-  () => props.open,
-  (o) => {
-    if (o && !props.file && !bitmap.value) input.value?.click()
+  () => [props.open, props.file] as const,
+  ([open, file]) => {
+    if (!open) {retire(); return}
+    if (file) void load(file)
+    else {retire(); input.value?.click()}
   },
+  {immediate: true, flush: 'sync'},
 )
+onBeforeUnmount(() => {disposed = true; retire()})
 
 const picture = computed<Picture | null>(() => (bitmap.value ? scaled(bitmap.value, width.value, name.value) : null))
 const pixels = computed(() => (picture.value ? pixelsOf(picture.value).length : 0))
@@ -57,23 +88,30 @@ watch([picture, previewEl], ([p, el]) => {
 })
 
 function asStamp() {
-  if (!picture.value) return
-  stamp.value = picture.value
-  finish()
+  const pictureToPlace = picture.value
+  const ticket = generation
+  if (!owns(ticket) || !pictureToPlace) return
+  stamp.value = pictureToPlace
+  if (owns(ticket)) finish()
 }
 
 function asGuide() {
-  if (!picture.value) return
-  guide.picture = picture.value
-  guide.x = Math.max(0, Math.round(props.at.x - picture.value.w / 2))
-  guide.y = Math.max(0, Math.round(props.at.y - picture.value.h / 2))
+  const pictureToPlace = picture.value
+  const ticket = generation
+  if (!owns(ticket) || !pictureToPlace) return
+  guide.picture = pictureToPlace
+  if (!owns(ticket)) return
+  guide.x = Math.max(0, Math.round(props.at.x - pictureToPlace.w / 2))
+  if (!owns(ticket)) return
+  guide.y = Math.max(0, Math.round(props.at.y - pictureToPlace.h / 2))
+  if (!owns(ticket)) return
   guide.visible = true
-  finish()
+  if (owns(ticket)) finish()
 }
 
 function finish() {
-  bitmap.value = null
-  emit('close')
+  retire()
+  if (!disposed) emit('close')
 }
 
 function pick(e: Event) {

@@ -46,6 +46,34 @@ export function isImage(f: {type: string; name?: string}): boolean {
   return f.type.startsWith('image/') || IMAGE_EXT.test(f.name ?? '')
 }
 
+
+const decodedResources = new WeakMap<Decoded, () => void>()
+
+/** Release the native source after its last preview has been rasterised. */
+export function disposeDecoded(image: Decoded | null) {
+  if (!image) return
+  const release = decodedResources.get(image)
+  decodedResources.delete(image)
+  release?.()
+}
+
+const cancelledImage = () => new DOMException('Image reading was cancelled.', 'AbortError')
+
+async function imageRead<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return work
+  let cancel!: () => void
+  const cancelled = new Promise<never>((_, reject) => {
+    cancel = () => reject(cancelledImage())
+    signal.addEventListener('abort', cancel, {once: true})
+  })
+  try {
+    if (signal.aborted) cancel()
+    return await Promise.race([work, cancelled])
+  } finally {
+    signal.removeEventListener('abort', cancel)
+  }
+}
+
 /**
  * Decodes any image the browser can show: PNG, JPEG, GIF and WebP (their first
  * frame when animated), AVIF, BMP, favicons (.ico, .cur) and SVG.
@@ -58,40 +86,74 @@ export function isImage(f: {type: string; name?: string}): boolean {
  * browsers, so its size is read from its viewBox. It is kept as a vector and
  * drawn at the width chosen, so it comes out sharp rather than enlarged.
  */
-export async function decode(file: File | Blob): Promise<Decoded> {
+export async function decode(file: File | Blob, signal?: AbortSignal): Promise<Decoded> {
+  const check = () => {if (signal?.aborted) throw cancelledImage()}
+  check()
   const name = (file as File).name ?? ''
   if (!isImage({type: file.type, name})) throw new Error('That is not an image.')
   const svg = file.type === 'image/svg+xml' || /\.svg$/i.test(name)
-  // An SVG served without its type would not render from a blob URL.
-  const blob = svg && file.type !== 'image/svg+xml' ? new Blob([await file.text()], {type: 'image/svg+xml'}) : file
+  const blob = svg && file.type !== 'image/svg+xml'
+    ? new Blob([await imageRead(file.text(), signal)], {type: 'image/svg+xml'}) : file
+  check()
   const url = URL.createObjectURL(blob)
+  let img: HTMLImageElement | null = null
+  let bitmap: ImageBitmap | null = null
+  let ownsURL = true
+  let released = false
+  let retained = false
+  const releaseURL = () => {
+    if (!ownsURL) return
+    ownsURL = false
+    URL.revokeObjectURL(url)
+    if (img) img.src = ''
+  }
+  const release = () => {
+    if (released) return
+    released = true
+    releaseURL()
+    bitmap?.close()
+    bitmap = null
+  }
+  const keep = (source: CanvasImageSource, width: number, height: number): Decoded => {
+    const image = {source, width, height, vector: svg}
+    decodedResources.set(image, release)
+    retained = true
+    return image
+  }
   try {
-    const img = new Image()
+    img = new Image()
     img.decoding = 'async'
     img.src = url
     try {
-      await img.decode()
+      await imageRead(img.decode(), signal)
     } catch {
+      check()
       throw new Error('This browser could not read that image. PNG, JPEG, GIF, WebP, AVIF, BMP, ICO and SVG all work.')
     }
+    check()
     let width = img.naturalWidth
     let height = img.naturalHeight
     if (svg) {
-      const size = svgSize(await blob.text())
+      const size = svgSize(await imageRead(blob.text(), signal))
       if (!width || !height) [width, height] = size ?? [512, 512]
-      // Vectors are drawn at the chosen size; start them at a size worth drawing at.
       const k = Math.max(1, 256 / Math.max(width, height))
       width = Math.round(width * k)
       height = Math.round(height * k)
     }
-    if (!width || !height) throw new Error('That image has no size to read.')
-    // A bitmap outlives its URL; an SVG's <img> needs the URL while it is drawn.
-    if (svg) return {source: img, width, height, vector: true}
-    return {source: await createImageBitmap(img), width, height, vector: false}
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) throw new Error('That image has no size to read.')
+    check()
+    if (svg) return keep(img, width, height)
+    // A bitmap allocation can finish after its caller has already cancelled.
+    const pending = createImageBitmap(img).then(value => {
+      if (released || signal?.aborted) {value.close(); throw cancelledImage()}
+      return value
+    })
+    bitmap = await imageRead(pending, signal)
+    check()
+    releaseURL()
+    return keep(bitmap, width, height)
   } finally {
-    // Kept for an SVG, which is redrawn from it at every width.
-    const f = file as Blob
-    if (!svg || f === blob) setTimeout(() => URL.revokeObjectURL(url), 60_000)
+    if (!retained) release()
   }
 }
 
