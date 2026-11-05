@@ -91,7 +91,7 @@ export async function dialogFixture() {
     decode(file,signal) {const d=deferred();requests.push({file,signal,...d});return d.promise},
     disposeDecoded(value) {if(value)disposed.push(value.id)},guide,stamp,
     scaled(value,width,name) {return {name,w:width,h:Math.round(width*value.height/value.width),canvas:{id:value.id}}},
-    pixelsOf:()=>[{x:0,y:0,rgb:1}]},
+    pixelsOf:()=>[{x:0,y:0,rgb:1}],pixelCount:()=>1},
     '../core/endpoint':{endpoint:{canvas:null}},'../core/format':{number:String,units:String},
     './Modal.vue':{default:{}},'./Icon.vue':{default:{}}}
   const source=readFileSync(new URL('../src/components/ImportDialog.vue',import.meta.url),'utf8')

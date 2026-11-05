@@ -3,7 +3,7 @@
 // costs, then either hold it as a stamp to click into the draft, or pin it
 // over the canvas as a guide to trace.
 import {computed, onBeforeUnmount, ref, shallowRef, watch} from 'vue'
-import {decode, disposeDecoded, guide, pixelsOf, scaled, stamp, type Decoded, type Picture} from '../core/image'
+import {decode, disposeDecoded, guide, pixelCount, scaled, stamp, type Decoded, type Picture} from '../core/image'
 import {endpoint} from '../core/endpoint'
 import {number, units} from '../core/format'
 import Modal from './Modal.vue'
@@ -78,7 +78,7 @@ watch(
 onBeforeUnmount(() => {disposed = true; retire()})
 
 const picture = computed<Picture | null>(() => (bitmap.value ? scaled(bitmap.value, width.value, name.value) : null))
-const pixels = computed(() => (picture.value ? pixelsOf(picture.value).length : 0))
+const pixels = computed(() => (picture.value ? pixelCount(picture.value) : 0))
 
 watch([picture, previewEl], ([p, el]) => {
   if (!p || !el) return

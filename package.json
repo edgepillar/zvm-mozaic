@@ -17,7 +17,7 @@
     "test:router": "node scripts/test-router.mjs",
     "mozaic": "node scripts/mozaic.mjs",
     "verify": "node scripts/verify.mjs",
-    "test:context": "node --experimental-vm-modules --test-reporter=tap --test test/endpoint-race.test.mjs test/heartbeat-race.test.mjs test/board-context.test.mjs test/draft-context.test.mjs test/board-details.test.mjs test/view-context.test.mjs test/import-context.test.mjs test/modal-context.test.mjs",
+    "test:context": "node --experimental-vm-modules --test-reporter=tap --test test/endpoint-race.test.mjs test/heartbeat-race.test.mjs test/board-context.test.mjs test/draft-context.test.mjs test/board-details.test.mjs test/view-context.test.mjs test/import-context.test.mjs test/modal-context.test.mjs test/image-count.test.mjs",
     "test:board-browser": "node scripts/test-board-browser.mjs"
   },
   "dependencies": {

@@ -29,7 +29,7 @@ const routerPaint = {address: R, blockNumber: '0x9', transactionHash: TX, transa
   topics: [topic('PaintedBy(address,address,uint256)'), addressTopic(ARTIST), addressTopic(ARTIST)], data: encodeAbiParameters([{type: 'uint256'}], [1n])}
 const DETAIL_CASES = ['late-history-details','late-router-details','live-details','history-unavailable-details','unavailable-details']
 const GESTURE_CASES = ["pointer-cancel", "held-pointer-context", "pinch-spray", "deferred-route", "view-dimensions"]
-const IMAGE_CASES = ['image-stamp', 'image-close', 'image-replace-guide', 'image-close-pending', 'image-drop']
+const IMAGE_CASES = ['image-stamp', 'image-close', 'image-replace-guide', 'image-close-pending', 'image-drop', 'image-alpha-count']
 const MODAL_CASES = ['image-queued-close', 'image-native-escape', 'node-modal-queued-close']
 function detailPaint({block = 9, painter = ARTIST, transaction = TX, rgb = 0x112233} = {}) {
   const packed = '0x' + DETAIL_INDEX.toString(16).padStart(6, '0') + rgb.toString(16).padStart(6, '0')
@@ -398,7 +398,7 @@ async function failureDetail(error, state, page) {
 try {
   browser = await puppeteer.launch({executablePath, headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--no-first-run']})
   const browserVersion = await browser.version()
-  for (const name of ['old-head', 'old-totals', 'late-router', 'unavailable', 'old-chunk', 'old-history', 'old-log-error', 'canvas-switch', 'draft-context', 'draft-fast-return', 'draft-storage-reload', 'legacy-storage-migration', 'late-history-details', 'late-router-details', 'live-details', 'history-unavailable-details', 'unavailable-details', 'pointer-cancel', 'held-pointer-context', 'pinch-spray', 'deferred-route', 'view-dimensions', 'image-stamp', 'image-close', 'image-replace-guide', 'image-close-pending', 'image-drop', 'image-queued-close', 'image-native-escape', 'node-modal-queued-close']) {
+  for (const name of ['old-head', 'old-totals', 'late-router', 'unavailable', 'old-chunk', 'old-history', 'old-log-error', 'canvas-switch', 'draft-context', 'draft-fast-return', 'draft-storage-reload', 'legacy-storage-migration', 'late-history-details', 'late-router-details', 'live-details', 'history-unavailable-details', 'unavailable-details', 'pointer-cancel', 'held-pointer-context', 'pinch-spray', 'deferred-route', 'view-dimensions', 'image-stamp', 'image-close', 'image-replace-guide', 'image-close-pending', 'image-drop', 'image-queued-close', 'image-native-escape', 'node-modal-queued-close', 'image-alpha-count']) {
     active = {name, held: new Map(), calls: [], contractCalls: []}; const state = active
     console.log('MOZAIC-BOARD-BROWSER-START ' + JSON.stringify({case: name, source}))
     const context = await browser.createBrowserContext(), page = await context.newPage()
@@ -770,6 +770,33 @@ try {
         actualSameNativeElementReopenedBeforeQueuedClose:true,actualTrustedQueuedCloseObserved:true,
         actualCurrentNativeEscapeStillCloses:true,actualNodeInputAndCurrentBoardPreserved:true,
         actualNativeDialogAndProductAPIsUnmodified:true,actualDraftPixels:0,transition,pass:true})
+
+    } else if (name === 'image-alpha-count') {
+      state.phase = 'actual PNG alpha bytes and preview-only scalar count'
+      await imageReady(page)
+      const file=await page.evaluate(async()=>{
+        const canvas=document.createElement('canvas');canvas.width=4;canvas.height=2
+        const alpha=[0,127,128,255,0,127,128,255],bytes=new Uint8ClampedArray(32)
+        for(let i=0;i<8;i++){bytes[i*4]=240;bytes[i*4+1]=12;bytes[i*4+2]=34;bytes[i*4+3]=alpha[i]}
+        canvas.getContext('2d').putImageData(new ImageData(bytes,4,2),0,0)
+        const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/png'))
+        if(!blob)throw new Error('The native alpha PNG encoder returned no file')
+        const file=new File([blob],'alpha-count.png',{type:'image/png'}),transfer=new DataTransfer();transfer.items.add(file)
+        const input=document.querySelector('dialog[open] [data-testid="image-input"]')
+        if(!input)throw new Error('The actual import input is unavailable')
+        input.files=transfer.files;input.dispatchEvent(new Event('change',{bubbles:true}))
+        return {name:file.name,type:file.type,bytes:file.size,encodedAlpha:alpha}
+      })
+      await smallImage(page)
+      state.phase = 'actual displayed alpha-filtered count before stamp'
+      await page.waitForFunction(()=>Array.from(document.querySelectorAll('dialog[open] p')).some(p=>p.textContent.trim().startsWith('4 pixels.')))
+      await page.click('[data-testid="as-stamp"]');await page.waitForFunction(()=>!document.querySelector('dialog[open]'))
+      const box=await(await page.$('[data-testid="board"]')).boundingBox();assert.ok(box)
+      await page.mouse.click(box.x+box.width/2,box.y+box.height/2);await badge(page,4)
+      results.push({case:name,actualNativePNGFileWithControlledAlphaBytes:true,actualFileInputChangeAndRangeKeyboard:true,
+        actualDisplayedPixels:4,actualPlacedDraftPixels:4,actualScaledStampDimensions:[4,2],
+        actualDefaultHalfOpacityThresholdPreserved:true,actualNativeCanvasAndProductAPIsUnmodified:true,
+        actualNoWalletOrChainSend:true,controlledFile:file,pass:true})
     } else {
       await waitStats(page, 5, 6); await quiet(page); await changeNode(page, '')
       await page.waitForFunction(() => {const rows = Array.from(document.querySelectorAll('.stats-body b'), node => node.textContent.trim()); return rows[0] === '-' && rows[2] === '-'})
@@ -792,14 +819,14 @@ try {
       await context.close()
     }
   }
-  console.log('MOZAIC-BOARD-BROWSER-AGGREGATE ' + JSON.stringify({source, attempted: 30, passed: results.length, failures}))
+  console.log('MOZAIC-BOARD-BROWSER-AGGREGATE ' + JSON.stringify({source, attempted: 31, passed: results.length, failures}))
   assert.deepEqual(failures, [], 'All independent production scenarios must pass')
-  assert.equal(results.length, 30); assert.deepEqual(errors, []); assert.deepEqual(unexpected, [])
+  assert.equal(results.length, 31); assert.deepEqual(errors, []); assert.deepEqual(unexpected, [])
   assert.ok(delivered.has('index.html') && Array.from(delivered.keys()).some(name => name.endsWith('.js')))
-  console.log('MOZAIC-BOARD-BROWSER-SUMMARY ' + JSON.stringify({schema: 1, source, cases: 30, passed: 30, failed: 0,
+  console.log('MOZAIC-BOARD-BROWSER-SUMMARY ' + JSON.stringify({schema: 1, source, cases: 31, passed: 31, failed: 0,
     browserVersion, nodeVersion: process.version, platform: process.platform, architecture: process.arch,
     actualProductPageVisibility: 'visible', independentScenarioFailuresCollectedBeforeFinalVerdict: true,
-    actualProductionEntryRoutes: ['canvas', 'gallery'], actualDraftPixelsPreserved: 1, actualIndexedDBAndLegacyStorage: true, nativeStorageLockCases: 3, actualDraftReloadCases: 1, actualPixelDetailCases: 5, stationaryPointerDetailCases: 2, actualGestureAndNavigationCases: 5, actualTouchInputCases: 3, actualRouteTimerBoundaryCases: 1, actualSmallCanvasCases: 1, actualImageImportCases: 7, actualNativeFileDropCases: 3, actualNativeModalCases: 3, actualQueuedModalCloseCases: 2, actualNativeEscapeCases: 2, actualNativePNGPlacementCases: 1, actualNativeSVGResourceCases: 4, actualExplicitObjectURLLifetimeCases: 5, actualPendingImportCloseCases: 1,
+    actualProductionEntryRoutes: ['canvas', 'gallery'], actualDraftPixelsPreserved: 1, actualIndexedDBAndLegacyStorage: true, nativeStorageLockCases: 3, actualDraftReloadCases: 1, actualPixelDetailCases: 5, stationaryPointerDetailCases: 2, actualGestureAndNavigationCases: 5, actualTouchInputCases: 3, actualRouteTimerBoundaryCases: 1, actualSmallCanvasCases: 1, actualImageImportCases: 8, actualNativeAlphaCountCases: 1, actualNativeFileDropCases: 3, actualNativeModalCases: 3, actualQueuedModalCloseCases: 2, actualNativeEscapeCases: 2, actualNativePNGPlacementCases: 2, actualNativeSVGResourceCases: 4, actualExplicitObjectURLLifetimeCases: 5, actualPendingImportCloseCases: 1,
     servedBuildFiles: Object.fromEntries(Array.from(delivered).sort()), unexpectedExternalRequests: 0, pageOrFixtureErrors: 0,
     walletProvidersConnected: 0, publicNetworkOrRealNoMExecution: false, sourceTestHooksOrProductModuleReplacements: 0}))
 } catch (error) {

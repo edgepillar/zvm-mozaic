@@ -192,6 +192,19 @@ export function scaled(image: Decoded, width: number, name: string): Picture {
   return {name, canvas, w, h}
 }
 
+/** Count the same pixels as pixelsOf without creating preview-only point records. */
+export function pixelCount(p: Picture, alpha = 128): number {
+  const d = p.canvas.getContext('2d', {willReadFrequently: true})!.getImageData(0, 0, p.w, p.h).data
+  let count = 0
+  for (let y = 0; y < p.h; y++)
+    for (let x = 0; x < p.w; x++) {
+      const o = (y * p.w + x) * 4
+      if (d[o + 3] < alpha) continue
+      count++
+    }
+  return count
+}
+
 /** The picture's pixels with at least `alpha` opacity (0..255), relative to its top left. */
 export function pixelsOf(p: Picture, alpha = 128): {x: number; y: number; rgb: number}[] {
   const d = p.canvas.getContext('2d', {willReadFrequently: true})!.getImageData(0, 0, p.w, p.h).data
