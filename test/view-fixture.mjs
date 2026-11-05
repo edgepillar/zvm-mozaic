@@ -49,7 +49,7 @@ export async function fixture(options = {}) {
   const prefs = reactive({tool: options.tool ?? 'pan', size: options.size ?? 1, round: false, filled: false,
     primary: 0x123456, secondary: 0x654321, opacity: 1, density: 1, tolerance: 0,
     grid: false, showDraft: true, mirrorX: false, mirrorY: false})
-  const board = reactive({status: 'ready', width, height, historyLoading: false, historyFrom: 0, clearedAt: null})
+  const board = reactive({status: options.initialStatus ?? 'ready', width, height, historyLoading: false, historyFrom: 0, clearedAt: null})
   const endpoint = reactive({rpc: 'a', chainId: 1, contract: '0x' + '1'.repeat(40), canvas: {}, router: null, deployBlock: 0})
   const chain = reactive({head: 10, interval: 15})
   const on = key => fn => {listeners[key].add(fn); return () => listeners[key].delete(fn)}

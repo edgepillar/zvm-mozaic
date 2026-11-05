@@ -84,6 +84,7 @@ export interface Hud {
 const hud = reactive<Hud>({x: null, y: null, color: null, draft: null, painter: null, paintedAgo: null, zoom: 1})
 
 function setView(s: number, x: number, y: number) {
+  if (disposed || board.status !== 'ready' || !W || !H) return
   scale = Math.max(minScale(), Math.min(MAX_SCALE, s))
   ox = x
   oy = y
@@ -558,7 +559,12 @@ function onVisibility() {
 
 /** Keep the same centre while adopting the current canvas's zoom bounds. */
 function reconcileView() {
-  if (!cssW || !cssH || !W || !H) return
+  if (!cssW || !cssH || !W || !H || board.status !== 'ready') return
+  if (!viewed) {
+    viewed = true
+    initialView()
+    return
+  }
   const cx = (cssW / 2 - ox) / scale
   const cy = (cssH / 2 - oy) / scale
   const next = Math.max(minScale(), Math.min(MAX_SCALE, scale))
@@ -1006,9 +1012,10 @@ function resize() {
   // point, not a pixel, so it is placed as it is: centerOn would add half a
   // pixel, and the side column's slide fires a resize every frame, which walked
   // the view 12 canvas pixels down and right on every fold.
-  if (first) {
-    if (W) initialView()
-  } else if (W) setView(scale, cssW / 2 - cx * scale, cssH / 2 - cy * scale)
+  if (board.status === 'ready' && W && H) {
+    if (first || !viewed) reconcileView()
+    else setView(scale, cssW / 2 - cx * scale, cssH / 2 - cy * scale)
+  }
   // Redrawn now, not on the next frame. A ResizeObserver reports after layout
   // and before paint, so drawing here puts the picture back in the same frame
   // the resize wiped it. Waiting a frame showed the dark board behind it on
@@ -1024,10 +1031,6 @@ watch(
   () => board.status,
   (s) => {
     if (s !== 'ready') resetViewContext()
-    if (s === 'loading' && !viewed && cssW) {
-      viewed = true
-      initialView()
-    }
     if (s === 'ready') reconcileView()
     refreshDetails()
     invalidate()
@@ -1060,10 +1063,6 @@ onMounted(() => {
   ro = new ResizeObserver(resize)
   ro.observe(host.value!)
   resize()
-  if (board.status !== 'idle' && W) {
-    viewed = true
-    initialView()
-  }
   // The pixel under a still pointer can change under it (a fill, an undo,
   // someone else's paint), so the status line is rewritten with the layers.
   offs.push(

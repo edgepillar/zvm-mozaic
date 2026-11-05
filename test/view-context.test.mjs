@@ -6,7 +6,23 @@ const down = (f, x = 500, y = 500, pointerId = 1) => f.dispatch('pointerdown', {
 const move = (f, x = 502, y = 502, pointerId = 1) => f.dispatch('pointermove', {...f.screen(x, y), pointerId})
 const up = (f, type = 'pointerup', pointerId = 1) => f.dispatch(type, {...f.screen(502, 502), pointerId})
 
-if (process.env.MOZAIC_VIEW_ORIGINAL === '1') {
+
+const viewCentre = f => {const [s,x,y] = f.state().view; return [Math.floor((400-x)/s), Math.floor((300-y)/s), s]}
+if (process.env.MOZAIC_VIEW_GEOMETRY_ORIGINAL === '1') {
+  test('original synchronous loading initializes a cold view before dimensions exist', async () => {
+    const f = await fixture({width: 0, height: 0, initialStatus: 'idle'})
+    f.setContext('a', [1000, 1000]); assert.notDeepEqual(viewCentre(f), [500,500,8]); f.unmount()
+  })
+  test('original loading mount consumes a link using the preceding dimensions', async () => {
+    const f = await fixture({width: 40, height: 40, initialStatus: 'loading'})
+    f.setContext('a', [1000, 1000]); assert.notDeepEqual(viewCentre(f), [500,500,8]); f.unmount()
+  })
+  test('original manual camera input can rewrite a link before initial dimensions', async () => {
+    const f = await fixture({width: 0, height: 0, initialStatus: 'idle'})
+    f.exposed.zoomIn(); f.drainTimeouts(); assert.ok(f.history.writes.length > 0)
+    assert.notEqual(f.location.searchParams.get('x'), '500'); f.unmount()
+  })
+} else if (process.env.MOZAIC_VIEW_ORIGINAL === '1') {
   test('original pointer cancellation commits an uncommitted shape', async () => {
     const f = await fixture({tool: 'rect'}); down(f); move(f); f.frame()
     assert.equal(f.writes.length, 0); up(f, 'pointercancel')
@@ -168,5 +184,24 @@ if (process.env.MOZAIC_VIEW_ORIGINAL === '1') {
       else {assert.ok(s >= 20); assert.ok(x <= 0 && x + 40 * s >= 800); assert.ok(y <= 0 && y + 40 * s >= 600)}
       f.unmount()
     }
+  })
+
+  test('view cold initialization waits for dimensions and preserves the incoming link', async () => {
+    for (const bare of [false, true]) {
+      const f = await fixture({bare, width: 0, height: 0, initialStatus: 'idle'})
+      f.drainTimeouts(); assert.equal(f.history.writes.length, 0)
+      f.setContext('a', [1000, 1000]); assert.deepEqual(viewCentre(f), [500,500,8]); f.unmount()
+    }
+  })
+  test('view loading mount does not initialize with the preceding canvas dimensions', async () => {
+    const f = await fixture({width: 40, height: 40, initialStatus: 'loading'})
+    f.drainTimeouts(); assert.equal(f.history.writes.length, 0)
+    f.setContext('a', [1000, 1000]); assert.deepEqual(viewCentre(f), [500,500,8]); f.unmount()
+  })
+  test('view manual camera input cannot overwrite the initial link before readiness', async () => {
+    const f = await fixture({width: 0, height: 0, initialStatus: 'idle'})
+    f.exposed.zoomIn(); f.exposed.fit(); f.dispatch('wheel', {deltaY: -100}); f.drainTimeouts()
+    assert.equal(f.history.writes.length, 0); assert.equal(f.location.searchParams.get('x'), '500')
+    f.setContext('a', [1000,1000]); assert.deepEqual(viewCentre(f), [500,500,8]); f.unmount()
   })
 }

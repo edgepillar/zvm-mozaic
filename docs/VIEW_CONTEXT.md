@@ -34,7 +34,7 @@ capture and listeners; a retired callback cannot rewrite a later route.
 modules with declared memory-only Vue/compiler-macro, canvas, clock, input and
 data capabilities. Its virtual observation exports exist only in that fixture.
 It is not Vue compilation, browser, wallet, SDK, storage or node execution.
-The existing 137 module controls remain in `test:context`; 24 view controls add
+The existing 137 module controls remain in `test:context`; 27 view controls add
 normal-input and cancellation/context/navigation regression cases.
 
 The browser witness preserves all 17 previous production Canvas/Gallery/storage/
@@ -52,3 +52,7 @@ browser witnesses, all module controls and all 35 original isolated contract
 events. This does not qualify other browsers/platforms, independent tabs/crash
 recovery, real wallets/providers, public NoM/finality/economic behavior or release
 and operator acceptance. The original roadmap requirements remain open.
+
+Initial view and address writes wait for ready dimensions. Synchronous input
+retirement does not initialize a zero-sized or preceding canvas. Three additional
+memory controls cover cold startup, loading mounts and early camera input.
