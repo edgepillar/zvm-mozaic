@@ -735,7 +735,12 @@ try {
       state.phase = 'current native Escape still closes the image dialog and releases its source'
       const f=await imageReady(page);await chooseImage(page,{name:'escape.svg'});await smallImage(page)
       const first=await onlyImageURL(f);assert.equal(await canReadImageURL(page,first),true)
+      state.phase = 'current native Escape before parent preview retirement'
       await page.keyboard.press('Escape');await page.waitForFunction(()=>!document.querySelector('dialog[open]'))
+      // Native closure precedes its queued close notification to the parent.
+      // The hidden dialog still contains its preview until that owner retires it.
+      await page.waitForFunction(()=>!document.querySelector('dialog [data-testid="as-stamp"]'))
+      state.phase = 'parent preview retired before current Escape resource check'
       assert.equal(await canReadImageURL(page,first),false)
       const file=await page.evaluate(()=>{
         const svg='<svg xmlns="http://www.w3.org/2000/svg" width="4" height="2" viewBox="0 0 4 2"><rect width="4" height="2" fill="green"/></svg>'
@@ -746,7 +751,7 @@ try {
       await smallImage(page);const current=await onlyImageURL(f,2);assert.equal(await canReadImageURL(page,current),true)
       await page.click('dialog[open] button[title="Close"]');await page.waitForFunction(()=>!document.querySelector('dialog[open]'))
       assert.equal(await canReadImageURL(page,current),false);await badge(page,0)
-      results.push({case:name,actualNativeEscapeKey:true,actualCurrentEscapeClosesDialog:true,actualEscapeReleasesNativeSVGURL:true,
+      results.push({case:name,actualNativeEscapeKey:true,actualCurrentEscapeClosesDialog:true,actualParentPreviewRetirementObservedBeforeResourceCheck:true,actualEscapeReleasesNativeSVGURL:true,
         actualFreshDropAndNativePreviewRecoverAfterEscape:true,actualNextCurrentCloseStillReleasesSource:true,
         actualNativeDialogAndProductAPIsUnmodified:true,actualDraftPixels:0,controlledFile:file,pass:true})
     } else if (name === 'node-modal-queued-close') {
