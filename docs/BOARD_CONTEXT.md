@@ -48,3 +48,5 @@ Draft storage context, native IndexedDB coverage and remaining persistence limit
 are described in [DRAFT_CONTEXT.md](DRAFT_CONTEXT.md).
 
 Current selected-pixel/history publication is described in [PIXEL_DETAILS.md](PIXEL_DETAILS.md).
+
+View input, transient marks and deferred navigation have their own lifetime boundaries; see [View ownership](VIEW_CONTEXT.md).

@@ -42,5 +42,5 @@ jobs:
       - run: cp .env.example .env
       - run: npm run typecheck
       - run: npm run build
-      - name: Check production canvas, gallery, native storage and current pixel details
+      - name: Check production canvas storage details gestures and navigation
         run: npm run test:board-browser

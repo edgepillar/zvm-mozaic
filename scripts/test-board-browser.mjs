@@ -28,6 +28,7 @@ const canvasPaint = {address: A, blockNumber: '0x9', transactionHash: TX, transa
 const routerPaint = {address: R, blockNumber: '0x9', transactionHash: TX, transactionIndex: '0x0', logIndex: '0x0', blockHash: hash, removed: false,
   topics: [topic('PaintedBy(address,address,uint256)'), addressTopic(ARTIST), addressTopic(ARTIST)], data: encodeAbiParameters([{type: 'uint256'}], [1n])}
 const DETAIL_CASES = ['late-history-details','late-router-details','live-details','history-unavailable-details','unavailable-details']
+const GESTURE_CASES = ["pointer-cancel", "held-pointer-context", "pinch-spray", "deferred-route", "view-dimensions"]
 function detailPaint({block = 9, painter = ARTIST, transaction = TX, rgb = 0x112233} = {}) {
   const packed = '0x' + DETAIL_INDEX.toString(16).padStart(6, '0') + rgb.toString(16).padStart(6, '0')
   return {...canvasPaint, blockNumber: hex(block), transactionHash: transaction,
@@ -70,7 +71,7 @@ async function rpc(state, node, call, batched) {
       if (['late-router', 'late-router-details'].includes(state.name) && node === 'a' && !state.held.has('router')) return hold(state, 'router', value)
       return value
     }
-    if (functionName === 'WIDTH' || functionName === 'HEIGHT') return encode(abi, functionName, 1000n)
+    if (functionName === 'WIDTH' || functionName === 'HEIGHT') return encode(abi, functionName, state.name === 'view-dimensions' && node === 'b' ? 40n : 1000n)
     if (functionName === 'price') return encode(abi, functionName, 100_000_000_000_000n)
     if (functionName === 'owner') return encode(abi, functionName, ARTIST)
     if (functionName === 'painted') {
@@ -263,6 +264,24 @@ async function pauseThroughPicker(page) {
 
 async function quietExceptHeld(page) {await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))}
 
+
+const gestureDraftCount = page => page.evaluate(() => Number(document.querySelector('.rail-badge')?.textContent.trim() ?? 0))
+async function gestureReady(page) {
+  await waitStats(page, 5, 6); await quiet(page); await badge(page, 0)
+  const canvas = await page.$('[data-testid="board"]'), box = await canvas.boundingBox()
+  assert.ok(box && box.width > 100 && box.height > 100)
+  const session = await page.createCDPSession()
+  await session.send('Emulation.setTouchEmulationEnabled', {enabled: true, maxTouchPoints: 3})
+  const point = (id, dx = 0, dy = 0) => ({id, x: box.x + box.width / 2 + dx, y: box.y + box.height / 2 + dy, radiusX: 1, radiusY: 1, force: 1})
+  const touch = (type, touchPoints) => session.send('Input.dispatchTouchEvent', {type, touchPoints})
+  return {canvas, box, session, point, touch}
+}
+async function gestureTool(page, key, large = false) {
+  await page.keyboard.press(key)
+  if (large) for (let i = 0; i < 23; i++) await page.keyboard.press(']')
+  await page.waitForFunction(() => getComputedStyle(document.querySelector('[data-testid="board"]')).cursor === 'crosshair')
+}
+
 async function failureDetail(error, state, page) {
   const observed = await Promise.race([
     page.evaluate(() => ({visibility: document.visibilityState,
@@ -280,7 +299,7 @@ async function failureDetail(error, state, page) {
 try {
   browser = await puppeteer.launch({executablePath, headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--no-first-run']})
   const browserVersion = await browser.version()
-  for (const name of ['old-head', 'old-totals', 'late-router', 'unavailable', 'old-chunk', 'old-history', 'old-log-error', 'canvas-switch', 'draft-context', 'draft-fast-return', 'draft-storage-reload', 'legacy-storage-migration', 'late-history-details', 'late-router-details', 'live-details', 'history-unavailable-details', 'unavailable-details']) {
+  for (const name of ['old-head', 'old-totals', 'late-router', 'unavailable', 'old-chunk', 'old-history', 'old-log-error', 'canvas-switch', 'draft-context', 'draft-fast-return', 'draft-storage-reload', 'legacy-storage-migration', 'late-history-details', 'late-router-details', 'live-details', 'history-unavailable-details', 'unavailable-details', 'pointer-cancel', 'held-pointer-context', 'pinch-spray', 'deferred-route', 'view-dimensions']) {
     active = {name, held: new Map(), calls: [], contractCalls: []}; const state = active
     console.log('MOZAIC-BOARD-BROWSER-START ' + JSON.stringify({case: name, source}))
     const context = await browser.createBrowserContext(), page = await context.newPage()
@@ -303,7 +322,7 @@ try {
       if (name === 'draft-context') await keeper.lock()
       if (name === 'legacy-storage-migration') {legacyValue = Buffer.from(draftBytes(1, 0xff0000)).toString('hex'); await keeper.legacy(draftKey(13370), legacyValue); await keeper.lock('readonly')}
     }
-    const query = new URLSearchParams({rpc: origin + '/node/a/rpc', contract: A, x: DETAIL_CASES.includes(name) ? '500' : '0', y: DETAIL_CASES.includes(name) ? '500' : '0', z: '8', ...(['late-router', 'late-router-details'].includes(name) ? {router: R} : {})})
+    const query = new URLSearchParams({rpc: origin + '/node/a/rpc', contract: A, x: (DETAIL_CASES.includes(name) || GESTURE_CASES.includes(name)) ? '500' : '0', y: (DETAIL_CASES.includes(name) || GESTURE_CASES.includes(name)) ? '500' : '0', z: '8', ...(['late-router', 'late-router-details'].includes(name) ? {router: R} : {})})
     // Opening the keeper tab can background the product. Its real visibility
     // and animation-frame polling must match the foreground UI under test.
     await page.bringToFront()
@@ -459,6 +478,71 @@ try {
       results.push({case: name, actualPointerSelection: true, actualInvalidNodePickerUsed: true,
         oldSelectedPainterAndTransactionCleared: true, actualSelectedColour: '#ffffff',
         actualSelectedKnowledge: 'Canvas details are unavailable.', pass: true})
+
+    } else if (name === 'pointer-cancel') {
+      const g = await gestureReady(page); await gestureTool(page, 'r')
+      const before = createHash('sha256').update(await g.canvas.screenshot()).digest('hex')
+      await g.touch('touchStart', [g.point(1)]); await g.touch('touchMove', [g.point(1, 24, 16)]); await quietExceptHeld(page)
+      const preview = createHash('sha256').update(await g.canvas.screenshot()).digest('hex')
+      assert.notEqual(preview, before); await badge(page, 0)
+      await g.touch('touchCancel', []); await later(120); await badge(page, 0)
+      await g.touch('touchStart', [g.point(1)]); await g.touch('touchMove', [g.point(1, 24, 16)]); await g.touch('touchEnd', [])
+      await untilAsync(async () => await gestureDraftCount(page) > 0, 'A fresh owned shape must still commit through real input')
+      results.push({case: name, actualCDPTouchCancellation: true, actualPreviewChangedRenderedCanvas: true,
+        actualCancelledDraftPixels: 0, actualNextOwnedShapeDraftPixels: await gestureDraftCount(page), pass: true})
+    } else if (name === 'held-pointer-context') {
+      const g = await gestureReady(page); await gestureTool(page, 's', true)
+      await g.touch('touchStart', [g.point(1)])
+      await untilAsync(async () => await gestureDraftCount(page) > 0, 'The held original spray must really draw')
+      const originalPixels = await gestureDraftCount(page)
+      await changeNode(page, origin + '/node/b/rpc'); await waitStats(page, 7, 8); await quiet(page); await badge(page, 0)
+      await g.touch('touchMove', [g.point(1, 20, 20)]); await later(250); await g.touch('touchEnd', []); await quietExceptHeld(page); await badge(page, 0)
+      results.push({case: name, actualHeldTouchAndSprayBeforeNodeChange: true, actualOriginalNodeDraftPixels: originalPixels,
+        actualNodePickerUsed: true, actualLaterNodeDraftPixels: 0, oldPointerMoveAndReleaseDidNotWrite: true,
+        currentSnapshotChunks: state.contractCalls.filter(row => row.node === 'b' && row.functionName === 'chunk').length, pass: true})
+    } else if (name === 'pinch-spray') {
+      const g = await gestureReady(page); await gestureTool(page, 's', true)
+      await g.touch('touchStart', [g.point(1, -24)])
+      await untilAsync(async () => await gestureDraftCount(page) > 0, 'The spray must draw before the second finger')
+      await g.touch('touchStart', [g.point(1, -24), g.point(2, 24)]); await quietExceptHeld(page)
+      const before = await gestureDraftCount(page)
+      await g.touch('touchMove', [g.point(1, -40), g.point(2, 40)]); await later(260); await quietExceptHeld(page)
+      assert.equal(await gestureDraftCount(page), before)
+      await g.touch('touchEnd', []); await later(450)
+      const zoom = Number(new URL(page.url()).searchParams.get('z')); assert.ok(zoom > 8)
+      results.push({case: name, actualTwoTouchPinch: true, actualSprayDraftPixelsAtTakeover: before,
+        actualDraftPixelsAfterPinch: await gestureDraftCount(page), actualPinchChangedURLZoom: zoom,
+        stoppedHeldSprayWhilePreservingCameraInput: true, pass: true})
+    } else if (name === 'deferred-route') {
+      await waitStats(page, 5, 6); await quiet(page); await later(450)
+      const session = await page.createCDPSession(); await session.send('Page.enable')
+      const navigations = []; let started = 0
+      session.on('Page.navigatedWithinDocument', event => navigations.push({url: event.url, elapsed: Date.now() - started}))
+      const canvas = await page.$('[data-testid="board"]'), box = await canvas.boundingBox(); assert.ok(box)
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+      started = Date.now(); await page.mouse.wheel({deltaY: -100}); await page.click('[data-testid="nav-gallery"]')
+      await page.waitForSelector('[data-testid="gallery-view"]', {visible: true}); await later(850)
+      const gallery = navigations.filter(row => new URL(row.url).pathname === base + 'gallery')
+      assert.ok(gallery.length > 0 && gallery[0].elapsed < 400, 'The real route must change while the old 400 ms view write is still pending')
+      const view = url => {const q = new URL(url).searchParams; return ['x','y','z'].map(key => q.get(key))}
+      for (const row of gallery) assert.deepEqual(view(row.url), view(gallery[0].url))
+      results.push({case: name, actualWheelInputAndGalleryNavigation: true, actualNavigationElapsedMs: gallery[0].elapsed,
+        actualSameDocumentNavigationEvents: gallery.length, actualGalleryViewQuery: view(gallery[0].url),
+        obsoleteViewDidNotRewriteTheNextRoute: true, pass: true})
+    } else if (name === 'view-dimensions') {
+      await waitStats(page, 5, 6); await quiet(page); await changeNode(page, origin + '/node/b/rpc'); await waitStats(page, 7, 8); await quiet(page)
+      const pixels = await page.$eval('[data-testid="board"]', canvas => {
+        const context = canvas.getContext('2d'), sample = (x, y) => Array.from(context.getImageData(x, y, 1, 1).data).slice(0, 3)
+        const reference = document.createElement('canvas'); reference.width = reference.height = 1
+        const c = reference.getContext('2d'); c.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--sunk').trim(); c.fillRect(0, 0, 1, 1)
+        return {uncoveredBackground: Array.from(c.getImageData(0, 0, 1, 1).data).slice(0, 3),
+          corners: [[4,4],[canvas.width-5,4],[4,canvas.height-5],[canvas.width-5,canvas.height-5]].map(([x,y]) => sample(x,y))}
+      })
+      for (const corner of pixels.corners) assert.notDeepEqual(corner, pixels.uncoveredBackground)
+      const chunks = state.contractCalls.filter(row => row.node === 'b' && row.functionName === 'chunk').length; assert.equal(chunks, 1)
+      results.push({case: name, actualNodePickerUsed: true, controlledNewCanvasDimensions: [40,40], currentSnapshotChunks: chunks,
+        actualRenderedCornerRGB: pixels.corners, actualUncoveredBackgroundRGB: pixels.uncoveredBackground,
+        currentCanvasStillCoversTheBoard: true, pass: true})
     } else {
       await waitStats(page, 5, 6); await quiet(page); await changeNode(page, '')
       await page.waitForFunction(() => {const rows = Array.from(document.querySelectorAll('.stats-body b'), node => node.textContent.trim()); return rows[0] === '-' && rows[2] === '-'})
@@ -481,14 +565,14 @@ try {
       await context.close()
     }
   }
-  console.log('MOZAIC-BOARD-BROWSER-AGGREGATE ' + JSON.stringify({source, attempted: 17, passed: results.length, failures}))
+  console.log('MOZAIC-BOARD-BROWSER-AGGREGATE ' + JSON.stringify({source, attempted: 22, passed: results.length, failures}))
   assert.deepEqual(failures, [], 'All independent production scenarios must pass')
-  assert.equal(results.length, 17); assert.deepEqual(errors, []); assert.deepEqual(unexpected, [])
+  assert.equal(results.length, 22); assert.deepEqual(errors, []); assert.deepEqual(unexpected, [])
   assert.ok(delivered.has('index.html') && Array.from(delivered.keys()).some(name => name.endsWith('.js')))
-  console.log('MOZAIC-BOARD-BROWSER-SUMMARY ' + JSON.stringify({schema: 1, source, cases: 17, passed: 17, failed: 0,
+  console.log('MOZAIC-BOARD-BROWSER-SUMMARY ' + JSON.stringify({schema: 1, source, cases: 22, passed: 22, failed: 0,
     browserVersion, nodeVersion: process.version, platform: process.platform, architecture: process.arch,
     actualProductPageVisibility: 'visible', independentScenarioFailuresCollectedBeforeFinalVerdict: true,
-    actualProductionEntryRoutes: ['canvas', 'gallery'], actualDraftPixelsPreserved: 1, actualIndexedDBAndLegacyStorage: true, nativeStorageLockCases: 3, actualDraftReloadCases: 1, actualPixelDetailCases: 5, stationaryPointerDetailCases: 2,
+    actualProductionEntryRoutes: ['canvas', 'gallery'], actualDraftPixelsPreserved: 1, actualIndexedDBAndLegacyStorage: true, nativeStorageLockCases: 3, actualDraftReloadCases: 1, actualPixelDetailCases: 5, stationaryPointerDetailCases: 2, actualGestureAndNavigationCases: 5, actualTouchInputCases: 3, actualRouteTimerBoundaryCases: 1, actualSmallCanvasCases: 1,
     servedBuildFiles: Object.fromEntries(Array.from(delivered).sort()), unexpectedExternalRequests: 0, pageOrFixtureErrors: 0,
     walletProvidersConnected: 0, publicNetworkOrRealNoMExecution: false, sourceTestHooksOrProductModuleReplacements: 0}))
 } catch (error) {

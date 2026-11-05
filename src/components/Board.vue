@@ -33,6 +33,8 @@ const host = ref<HTMLDivElement | null>(null)
 const cv = ref<HTMLCanvasElement | null>(null)
 const mini = ref<HTMLCanvasElement | null>(null)
 let ctx: CanvasRenderingContext2D | null = null
+let disposed = false
+let viewEpoch = 0
 
 // --- the view -------------------------------------------------------------------
 
@@ -105,6 +107,7 @@ function centerOn(x: number, y: number, s = scale) {
 
 /** As far out as the view goes: the whole canvas in the gallery, covering the board elsewhere. */
 function fit() {
+  glide = null
   const s = minScale()
   setView(s, (cssW - W * s) / 2, (cssH - H * s) / 2)
 }
@@ -113,7 +116,11 @@ function fit() {
 let urlTimer: number | undefined
 function rememberView() {
   clearTimeout(urlTimer)
+  const epoch = viewEpoch
+  const path = location.pathname
   urlTimer = window.setTimeout(() => {
+    if (disposed || epoch !== viewEpoch || location.pathname !== path) return
+    urlTimer = undefined
     const u = new URL(location.href)
     const c = toCanvas(cssW / 2, cssH / 2)
     u.searchParams.set('x', String(Math.max(0, Math.min(W - 1, c.x))))
@@ -154,6 +161,7 @@ function readCss() {
 }
 
 function invalidate() {
+  if (disposed) return
   if (!frame) frame = requestAnimationFrame(render)
 }
 
@@ -171,7 +179,7 @@ let hover: Pt | null = null
 
 function render(now: number) {
   frame = 0
-  if (!ctx) return
+  if (disposed || !ctx) return
   looping = false
 
   if (glide) {
@@ -426,9 +434,12 @@ function drawPoints(pts: Pt[], color: (p: Pt) => number) {
 let miniTimer: number | undefined
 let miniDirty = false
 function drawMiniSoon() {
+  if (disposed) return
   miniDirty = true
   if (miniTimer) return
+  const epoch = viewEpoch
   miniTimer = window.setTimeout(() => {
+    if (disposed || epoch !== viewEpoch) return
     miniTimer = undefined
     if (miniDirty) drawMini()
   }, 120)
@@ -456,6 +467,8 @@ function drawMini() {
 }
 
 function miniJump(e: PointerEvent) {
+  if (disposed) return
+  glide = null
   if (e.type === 'pointermove' && !(e.buttons & 1)) return
   const m = mini.value!
   const r = m.getBoundingClientRect()
@@ -479,13 +492,87 @@ let sprayTimer: number | undefined
 let region: Pt[] = []
 const pointers = new Map<number, {x: number; y: number}>()
 let pinch: {d: number; cx: number; cy: number} | null = null
+let gestureEpoch = 0
+const ownsGesture = (epoch: number) => !disposed && epoch === gestureEpoch && board.status === 'ready'
+
+/** End applied freehand work; discard uncommitted shape previews. */
+function stopGesture(finishStroke = true, releasePointers = true) {
+  gestureEpoch++
+  clearInterval(sprayTimer)
+  sprayTimer = undefined
+  cancelAnimationFrame(previewFrame)
+  previewFrame = 0
+  previewAt = null
+  if (finishStroke && (mode === 'brush' || mode === 'erase' || mode === 'spray')) endStroke()
+  mode = null
+  panning = false
+  tap = null
+  preview = null
+  region = []
+  start = last = null
+  pinch = null
+  if (releasePointers) {
+    const ids = [...pointers.keys()]
+    pointers.clear()
+    for (const id of ids) {
+      try {
+        const canvas = cv.value
+        if (canvas?.hasPointerCapture(id)) canvas.releasePointerCapture(id)
+      } catch {
+        // The browser may already have retired an ended pointer.
+      }
+    }
+  }
+}
+
+/** Transient input and old paint marks never belong to the next canvas. */
+function resetViewContext() {
+  viewEpoch++
+  stopGesture()
+  strokeEnd = null
+  fresh.length = 0
+  located = null
+  glide = null
+  clearTimeout(urlTimer)
+  urlTimer = undefined
+  clearTimeout(miniTimer)
+  miniTimer = undefined
+  miniDirty = false
+}
+
+function onCancel(e: PointerEvent) {
+  if (!pointers.has(e.pointerId)) return
+  stopGesture()
+  invalidate()
+}
+
+function onBlur() {
+  space = false
+  stopGesture()
+  invalidate()
+}
+
+function onVisibility() {
+  if (document.visibilityState === 'hidden') onBlur()
+}
+
+/** Keep the same centre while adopting the current canvas's zoom bounds. */
+function reconcileView() {
+  if (!cssW || !cssH || !W || !H) return
+  const cx = (cssW / 2 - ox) / scale
+  const cy = (cssH / 2 - oy) / scale
+  const next = Math.max(minScale(), Math.min(MAX_SCALE, scale))
+  setView(next, cssW / 2 - cx * next, cssH / 2 - cy * next)
+}
 
 const inside = (p: Pt) => p.x >= 0 && p.y >= 0 && p.x < W && p.y < H
 const mirrorOf = (pts: Pt[]) => mirrored(pts, prefs.mirrorX ? axis.x : null, prefs.mirrorY ? axis.y : null)
 
 /** Lays points into the draft, each pixel once per stroke, opacity blended over what is seen there. */
 function lay(pts: Pt[], color: (p: Pt) => number) {
+  const epoch = gestureEpoch
   for (const p of mirrorOf(pts)) {
+    if (!ownsGesture(epoch)) return
     if (!inside(p)) continue
     const i = p.y * W + p.x
     if (touched.has(i)) continue
@@ -496,7 +583,11 @@ function lay(pts: Pt[], color: (p: Pt) => number) {
 }
 
 function erase(pts: Pt[]) {
-  for (const p of mirrorOf(pts)) remove(p.x, p.y)
+  const epoch = gestureEpoch
+  for (const p of mirrorOf(pts)) {
+    if (!ownsGesture(epoch)) return
+    remove(p.x, p.y)
+  }
 }
 
 function pos(e: PointerEvent | WheelEvent | MouseEvent) {
@@ -510,24 +601,21 @@ function pick(p: Pt, into: 'primary' | 'secondary' = 'primary') {
 }
 
 function onDown(e: PointerEvent) {
-  if (board.status !== 'ready') return
+  if (disposed || board.status !== 'ready' || pointers.has(e.pointerId) || pointers.size >= 2) return
+  glide = null
   cv.value!.setPointerCapture(e.pointerId)
   const {sx, sy} = pos(e)
   pointers.set(e.pointerId, {x: sx, y: sy})
 
   // A second finger turns whatever the first was doing into a pinch.
   if (pointers.size === 2) {
-    tap = null
-    if (mode && mode !== 'pan') {
-      endStroke()
-      preview = null
-    }
+    stopGesture(true, false)
     const [a, b] = [...pointers.values()]
     pinch = {d: Math.hypot(a.x - b.x, a.y - b.y), cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2}
     mode = 'pinch'
     return
   }
-  if (pointers.size > 2) return
+  gestureEpoch++
 
   const p = toCanvas(sx, sy)
   // Bare, the canvas is only looked at: every drag moves the view.
@@ -574,16 +662,19 @@ function onDown(e: PointerEvent) {
       beginStroke()
       erase(footprint(p, prefs.size, prefs.round))
       break
-    case 'spray':
+    case 'spray': {
       mode = 'spray'
       beginStroke()
       lay(spray(p, prefs.size, prefs.density), () => strokeColor)
-      // A held spray keeps spraying where it is.
+      // A held spray belongs to this press, even after A -> B -> A.
+      const epoch = gestureEpoch
       sprayTimer = window.setInterval(() => {
+        if (!ownsGesture(epoch) || mode !== 'spray') return
         touched = new Set()
         if (last) lay(spray(last, prefs.size, prefs.density), () => strokeColor)
       }, 60)
       break
+    }
     case 'fill': {
       if (!inside(p)) return
       const {pts} = flood(p, W, H, seen, prefs.tolerance, W * H)
@@ -628,7 +719,9 @@ let previewAt: {p: Pt; shift: boolean} | null = null
 function previewSoon(p: Pt, shift: boolean) {
   previewAt = {p, shift}
   if (previewFrame) return
+  const epoch = gestureEpoch
   previewFrame = requestAnimationFrame(() => {
+    if (!ownsGesture(epoch)) return
     previewFrame = 0
     if (previewAt && (mode === 'shape' || mode === 'gradient')) updatePreview(previewAt.p, previewAt.shift)
     invalidate()
@@ -636,6 +729,9 @@ function previewSoon(p: Pt, shift: boolean) {
 }
 
 function onMove(e: PointerEvent) {
+  if (disposed) return
+  if (board.status !== 'ready') { stopGesture(); return }
+  if (mode && !pointers.has(e.pointerId)) return
   const {sx, sy} = pos(e)
   if (pointers.has(e.pointerId)) pointers.set(e.pointerId, {x: sx, y: sy})
   const p = toCanvas(sx, sy)
@@ -674,13 +770,11 @@ function onMove(e: PointerEvent) {
 }
 
 function onUp(e: PointerEvent) {
-  pointers.delete(e.pointerId)
+  if (!pointers.has(e.pointerId)) return
+  if (disposed || board.status !== 'ready') { stopGesture(); return }
   if (mode === 'pinch') {
-    tap = null
-    if (pointers.size < 2) {
-      mode = null
-      pinch = null
-    }
+    stopGesture(false)
+    invalidate()
     return
   }
   clearInterval(sprayTimer)
@@ -702,12 +796,7 @@ function onUp(e: PointerEvent) {
     strokeEnd = last
   } else if (mode === 'erase') endStroke()
   if (mode === 'pan' && tap) select(p)
-  tap = null
-  mode = null
-  panning = false
-  preview = null
-  region = []
-  start = null
+  stopGesture(false)
   invalidate()
 }
 
@@ -768,6 +857,7 @@ function readPixel(p: Pt): Picked {
 
 /** Refresh inspection only; history does not repaint or recount draft pixels. */
 function refreshDetails() {
+  if (disposed) return
   if (picked.value) picked.value = inside(picked.value) ? readPixel(picked.value) : null
   if (hover) describe(hover)
 }
@@ -795,7 +885,10 @@ function clearPick() {
 }
 
 function onKeyPick(e: KeyboardEvent) {
-  if (e.key === 'Escape' && picked.value) clearPick()
+  if (e.key !== 'Escape') return
+  stopGesture()
+  if (picked.value) clearPick()
+  invalidate()
 }
 
 function onLeave() {
@@ -807,6 +900,8 @@ function onLeave() {
 }
 
 function onWheel(e: WheelEvent) {
+  if (disposed) return
+  glide = null
   e.preventDefault()
   const {sx, sy} = pos(e)
   const unit = e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? cssH : 1
@@ -820,11 +915,14 @@ function onWheel(e: WheelEvent) {
 }
 
 function dropStamp(at: Pt) {
+  const epoch = gestureEpoch
+  if (!ownsGesture(epoch)) return
   const pic = stamp.value
   if (!pic) return
   beginStroke()
   touched = new Set()
   for (const q of pixelsOf(pic)) {
+    if (!ownsGesture(epoch)) return
     const x = at.x + q.x
     const y = at.y + q.y
     if (x < 0 || y < 0 || x >= W || y >= H) continue
@@ -864,6 +962,7 @@ function agoBlocks(n: number): string {
 
 /** Glides to a paint and outlines it. */
 function locate(p: {x0: number; y0: number; x1: number; y1: number}) {
+  if (disposed || board.status !== 'ready') return
   const w = p.x1 - p.x0 + 1
   const h = p.y1 - p.y0 + 1
   const s = Math.max(2, Math.min(24, Math.min(cssW / (w * 3), cssH / (h * 3))))
@@ -878,7 +977,7 @@ function centre(): Pt {
   return {x: Math.max(0, Math.min(W - 1, c.x)), y: Math.max(0, Math.min(H - 1, c.y))}
 }
 
-defineExpose({locate, fit, zoomIn: () => zoomAt(1.5), zoomOut: () => zoomAt(1 / 1.5), centre, setSpace: (on: boolean) => (space = on)})
+defineExpose({locate, fit, zoomIn: () => { glide = null; zoomAt(1.5) }, zoomOut: () => { glide = null; zoomAt(1 / 1.5) }, centre, setSpace: (on: boolean) => (space = on)})
 
 // --- wiring ---------------------------------------------------------------------------
 
@@ -924,15 +1023,19 @@ let viewed = false
 watch(
   () => board.status,
   (s) => {
+    if (s !== 'ready') resetViewContext()
     if (s === 'loading' && !viewed && cssW) {
       viewed = true
       initialView()
     }
+    if (s === 'ready') reconcileView()
     refreshDetails()
     invalidate()
     drawMiniSoon()
   },
+  {flush: 'sync'},
 )
+watch(() => prefs.tool, () => { stopGesture(); invalidate() }, {flush: 'sync'})
 // A new head can age a selected paint while its live log read is still pending.
 watch(() => [chain.head, chain.interval] as const, refreshDetails)
 watch(
@@ -950,6 +1053,8 @@ const cursor = computed(() => {
 
 onMounted(() => {
   window.addEventListener('keydown', onKeyPick)
+  window.addEventListener('blur', onBlur)
+  document.addEventListener('visibilitychange', onVisibility)
   ctx = cv.value!.getContext('2d')
   readCss()
   ro = new ResizeObserver(resize)
@@ -977,6 +1082,7 @@ onMounted(() => {
   offs.push(onAttributionChanged(refreshDetails))
   offs.push(
     onArrived((ps) => {
+      if (disposed || board.status !== 'ready') return
       const now = performance.now()
       for (const p of ps.slice(-40)) fresh.push({p, at: now})
       invalidate()
@@ -990,7 +1096,11 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  disposed = true
+  resetViewContext()
   window.removeEventListener('keydown', onKeyPick)
+  window.removeEventListener('blur', onBlur)
+  document.removeEventListener('visibilitychange', onVisibility)
   ro?.disconnect()
   offs.forEach((f) => f())
   themeObserver?.disconnect()
@@ -1021,7 +1131,8 @@ const zoomLabel = computed(() => (hud.zoom >= 1 ? `${Math.round(hud.zoom * 100)}
       @pointerdown="onDown"
       @pointermove="onMove"
       @pointerup="onUp"
-      @pointercancel="onUp"
+      @pointercancel="onCancel"
+      @lostpointercapture="onCancel"
       @pointerleave="onLeave"
       @wheel="onWheel"
       @contextmenu.prevent
