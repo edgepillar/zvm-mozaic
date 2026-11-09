@@ -50,3 +50,34 @@ test('image count propagates the same declared canvas readback failure as the po
   assert.throws(()=>f.module.pixelCount(p),error=>error===failure)
   assert.throws(()=>f.module.pixelsOf(p),error=>error===failure)
 })
+
+
+test('stamp points read only the board overlap and retain picture coordinates', async () => {
+  const {module} = await imageFixture()
+  const p = picture(4, 3, i => [0, 127, 128, 255][i % 4])
+  const reads = []
+  p.canvas.getContext = () => ({
+    getImageData(x, y, w, h) {
+      reads.push([x, y, w, h])
+      const data = new Uint8ClampedArray(w * h * 4)
+      for (let row = 0; row < h; row++) {
+        const start = ((y + row) * p.w + x) * 4
+        data.set(p.bytes.subarray(start, start + w * 4), row * w * 4)
+      }
+      return {data}
+    },
+  })
+  const full = Array.from(module.pixelsOf(p), point => ({...point}))
+  reads.length = 0
+  for (const [bounds, read] of [
+    [{x: -2, y: -1, w: 5, h: 3}, [0, 0, 3, 2]],
+    [{x: 1, y: 1, w: 5, h: 4}, [1, 1, 3, 2]],
+  ]) {
+    const expected = full.filter(({x, y}) => x >= bounds.x && y >= bounds.y
+      && x < bounds.x + bounds.w && y < bounds.y + bounds.h)
+    assert.deepEqual(Array.from(module.pixelsOf(p, undefined, bounds), point => ({...point})), expected)
+    assert.deepEqual(reads.splice(0), [read])
+  }
+  assert.equal(module.pixelsOf(p, undefined, {x: 4, y: 0, w: 1, h: 1}).length, 0)
+  assert.deepEqual(reads, [])
+})

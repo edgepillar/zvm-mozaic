@@ -54,6 +54,29 @@ if (process.env.MOZAIC_VIEW_GEOMETRY_ORIGINAL === '1') {
     assert.equal(f.state().located, true); assert.equal(f.state().glide, true); assert.equal(f.state().fresh, 1); f.unmount()
   })
 } else {
+  test('view preserves the replacement stamp when the last visible write changes context', async () => {
+    const stamp = {value: {name: 'Old stamp', w: 3, h: 1}}
+    const replacement = {name: 'Replacement stamp', w: 1, h: 1}
+    const points = [0, 1, 2].map(x => ({x, y: 0, rgb: 0xff0000}))
+    let f
+    f = await fixture({stamp,
+      pixelsOf(_picture, _alpha, bounds) {
+        return bounds ? points.filter(({x, y}) => x >= bounds.x && y >= bounds.y
+          && x < bounds.x + bounds.w && y < bounds.y + bounds.h) : points
+      },
+      afterPut(x) {
+        if (x === 999) {
+          f.setContext('b')
+          stamp.value = replacement
+        }
+      },
+    })
+    down(f, 998, 500)
+    assert.deepEqual(f.writes.map(({scope, x}) => [scope, x]), [['a', 998], ['a', 999]])
+    assert.deepEqual(f.strokes, [{kind: 'begin', scope: 'a'}])
+    assert.equal(stamp.value, replacement)
+    f.unmount()
+  })
   test('view commits a normal owned shape release once and retires capture', async () => {
     const f = await fixture({tool: 'rect'}); down(f); move(f); f.frame(); up(f)
     assert.ok(f.writes.length > 0); assert.equal(f.state().mode, null); assert.equal(f.state().pointers, 0)

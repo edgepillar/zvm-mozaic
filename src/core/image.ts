@@ -205,15 +205,23 @@ export function pixelCount(p: Picture, alpha = 128): number {
   return count
 }
 
-/** The picture's pixels with at least `alpha` opacity (0..255), relative to its top left. */
-export function pixelsOf(p: Picture, alpha = 128): {x: number; y: number; rgb: number}[] {
-  const d = p.canvas.getContext('2d', {willReadFrequently: true})!.getImageData(0, 0, p.w, p.h).data
+/**
+ * Read pixels with at least `alpha` opacity, optionally within an integer
+ * rectangle in picture coordinates. Returned points use picture coordinates.
+ */
+export function pixelsOf(p: Picture, alpha = 128, bounds?: {x: number; y: number; w: number; h: number}): {x: number; y: number; rgb: number}[] {
+  const left = bounds ? Math.max(0, bounds.x) : 0
+  const top = bounds ? Math.max(0, bounds.y) : 0
+  const w = bounds ? Math.min(p.w, bounds.x + bounds.w) - left : p.w
+  const h = bounds ? Math.min(p.h, bounds.y + bounds.h) - top : p.h
+  if (bounds && (w <= 0 || h <= 0)) return []
+  const d = p.canvas.getContext('2d', {willReadFrequently: true})!.getImageData(left, top, w, h).data
   const out: {x: number; y: number; rgb: number}[] = []
-  for (let y = 0; y < p.h; y++)
-    for (let x = 0; x < p.w; x++) {
-      const o = (y * p.w + x) * 4
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++) {
+      const o = (y * w + x) * 4
       if (d[o + 3] < alpha) continue
-      out.push({x, y, rgb: (d[o] << 16) | (d[o + 1] << 8) | d[o + 2]})
+      out.push({x: left + x, y: top + y, rgb: (d[o] << 16) | (d[o + 1] << 8) | d[o + 2]})
     }
   return out
 }

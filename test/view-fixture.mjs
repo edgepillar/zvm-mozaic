@@ -57,10 +57,15 @@ export async function fixture(options = {}) {
   const draft = {draftSurface: canvas(), pendingSurface: canvas(), pending: {size: 0}, draftState: {},
     onLayers: on('layers'), seen: i => currentDraft().get(i) ?? options.background?.(i) ?? 0xffffff,
     beginStroke() {strokes.push({kind: 'begin', scope})}, endStroke() {strokes.push({kind: 'end', scope})},
-    put(x, y, rgb) {writes.push({scope, x, y, rgb}); currentDraft().set(y * width + x, rgb); return true},
+    put(x, y, rgb) {
+      writes.push({scope, x, y, rgb})
+      currentDraft().set(y * width + x, rgb)
+      options.afterPut?.(x, y)
+      return true
+    },
     remove(x, y) {writes.push({scope, x, y, remove: true}); currentDraft().delete(y * width + x)}}
   const guide = reactive({picture: null, visible: false, opacity: 1, x: 0, y: 0})
-  const stamp = {value: null}, usedColors = [], exposed = {}
+  const stamp = options.stamp ?? {value: null}, usedColors = [], exposed = {}
   const math = Object.create(Math)
   math.random = () => {seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 2 ** 32}
   const globals = {console, URL, URLSearchParams, document, window, location, history, Math: math,
@@ -83,7 +88,7 @@ export async function fixture(options = {}) {
       colorAt: i => options.background?.(i) ?? 0xffffff, whoPainted: () => null, onChanged: on('changed'), onAttributionChanged: on('attribution'), onArrived: on('arrived')},
     '../core/draft': draft,
     '../core/prefs': {prefs, axis: {x: 500, y: 500}, used: color => usedColors.push(color), putDown() {}},
-    '../core/image': {guide, stamp, isImage: () => false, pixelsOf: () => []},
+    '../core/image': {guide, stamp, isImage: () => false, pixelsOf: options.pixelsOf ?? (() => [])},
     '../core/chain': {chain}, '../core/format': {same: (a, b) => !!a && !!b && a.toLowerCase() === b.toLowerCase()},
     '../core/endpoint': {endpoint, explorerUrl: () => null}, '../core/wallet': {wallet: {address: null}}}
   const load = async url => {

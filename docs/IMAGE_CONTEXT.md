@@ -33,14 +33,13 @@ the paired-prop path. See [Vue watcher timing](https://vuejs.org/guide/essential
 ## Preview pixel counts
 
 The import preview uses pixelCount rather than constructing the full pixelsOf
-point list only to read its length. Both use the same RGBA readback, iteration
-and alpha comparison. The original point-list implementation and stamp behavior
-remain. The count-only path avoids per-included-pixel point records and RGB
-unpacking for this preview; it still reads the canvas bytes and scans the image.
+point list only to read its length. On a full image both use the same RGBA
+readback, iteration and alpha comparison. The count-only path avoids point
+records and RGB unpacking for the preview and still scans the full image.
 This is a source-level allocation change, not a measured runtime speed or peak
 memory claim, and it does not define a new image size or format policy.
 
-Six memory controls compare the actual count with the unchanged actual point-list
+Six memory controls compare the actual count with the full-image point-list
 function, including every byte cutoff, extended numeric alpha values, a bounded
 100,000-pixel reference, unchanged bytes/dimensions and readback failures. The
 changed import script's 20 existing controls also run locally; all 192 previous
@@ -53,6 +52,18 @@ range UI at 4 by 2 pixels, and requires both the displayed count and placed draf
 to contain four pixels. Native ImageData, PNG encoding/decoding and canvas
 readback must execute; no product or image API is replaced. See the
 [canvas pixel API](https://html.spec.whatwg.org/multipage/canvas.html#pixel-manipulation).
+
+## Stamp placement at the board edge
+
+Stamp placement reads only the intersection of the image and the board. Points
+retain their image-relative coordinates, order, RGB values and alpha threshold.
+The view checks gesture ownership after the last visible write before it ends
+the stroke and consumes the stamp.
+
+The added memory tests check the readback rectangle and a context change during
+the final visible write. The Chrome scenario places a four-by-two PNG at the
+right edge. It checks all eight preview pixels and the exact coordinates and
+colors of the four pixels saved in IndexedDB.
 
 ## Evidence boundaries
 
@@ -85,8 +96,8 @@ dialog in one page task through
 Every independent scenario is attempted before the verdict, with source,
 browser/platform and delivered production-file digests retained.
 
-Current-source hosted CI is still required for 198 module/script controls,
-31 native Chrome scenarios, all 35 original isolated contract events, fresh
+Current-source hosted CI is still required for 200 module/script controls,
+32 native Chrome scenarios, all 35 original isolated contract events, fresh
 contract/ABI drift checks, TypeScript and production build. Wider format/size,
 browser/platform, concurrent modal/tab/crash, real wallet/provider/NoM and
 maintainer/operator/release requirements remain open. All original roadmap

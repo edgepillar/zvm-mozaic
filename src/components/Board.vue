@@ -927,13 +927,15 @@ function dropStamp(at: Pt) {
   if (!pic) return
   beginStroke()
   touched = new Set()
-  for (const q of pixelsOf(pic)) {
+  const boardInPicture = {x: -at.x, y: -at.y, w: W, h: H}
+  for (const q of pixelsOf(pic, undefined, boardInPicture)) {
     if (!ownsGesture(epoch)) return
     const x = at.x + q.x
     const y = at.y + q.y
     if (x < 0 || y < 0 || x >= W || y >= H) continue
     put(x, y, prefs.opacity < 1 ? blend(q.rgb, seen(y * W + x), prefs.opacity) : q.rgb)
   }
+  if (!ownsGesture(epoch)) return
   endStroke()
   stamp.value = null
   invalidate()
