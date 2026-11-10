@@ -227,4 +227,30 @@ if (process.env.MOZAIC_VIEW_GEOMETRY_ORIGINAL === '1') {
     assert.equal(f.history.writes.length, 0); assert.equal(f.location.searchParams.get('x'), '500')
     f.setContext('a', [1000,1000]); assert.deepEqual(viewCentre(f), [500,500,8]); f.unmount()
   })
+  test('view allows file dragover from its advertised type without inspecting items', async () => {
+    const f = await fixture()
+    let prevented = 0
+    const preventDefault = () => { prevented++ }
+    f.dispatch('dragover', {dataTransfer: {types: ['text/plain']}, preventDefault})
+    assert.equal(prevented, 0)
+    f.dispatch('dragover', {dataTransfer: {types: ['Files'], items: []}, preventDefault})
+    assert.equal(prevented, 1)
+    assert.deepEqual(f.emitted, [])
+    f.unmount()
+  })
+  test('view prevents the default file drop and emits only the first supported image', async () => {
+    const checked = []
+    const f = await fixture({isImage(file) {checked.push(file.name); return file.name.endsWith('.bmp')}})
+    let prevented = 0
+    const preventDefault = () => { prevented++ }
+    const text = {name: 'note.txt'}, first = {name: 'first.bmp'}, next = {name: 'next.bmp'}
+    f.dispatch('drop', {dataTransfer: {files: []}, preventDefault})
+    assert.equal(prevented, 0)
+    f.dispatch('drop', {dataTransfer: {files: [text]}, preventDefault})
+    assert.equal(prevented, 1); assert.deepEqual(f.emitted, [])
+    f.dispatch('drop', {dataTransfer: {files: [text, first, next]}, preventDefault})
+    assert.equal(prevented, 2); assert.deepEqual(f.emitted, [['drop-image', first]])
+    assert.deepEqual(checked, ['note.txt', 'note.txt', 'first.bmp'])
+    f.unmount()
+  })
 }

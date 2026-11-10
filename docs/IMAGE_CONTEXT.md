@@ -137,6 +137,19 @@ frame in the oversized logical screen. Both fixtures keep their encoded size
 small. Other format headers and native decoder peak memory remain separate
 qualification work.
 
+## Board drop and raster paste
+
+The board accepts file drags through the advertised Files type. It cancels
+the default action for file drops and opens the first supported image. Text
+drags and non-image paste keep their default action. Closing the import
+dialog aborts its read and releases the page's original File reference.
+
+Chrome dispatches controlled file drops and clipboard events with mixed
+text and file data. Both paths report the byte and pixel limits before
+source URL requests, close during raster import, and reopen with valid
+eight-pixel previews without an unexpected file chooser or draft edits.
+The two routes share one oversized source File in the test browser.
+
 ## Evidence boundaries
 
 The memory controls execute the actual ImportDialog SFC script with an explicit
@@ -168,8 +181,8 @@ dialog in one page task through
 Every independent scenario is attempted before the verdict, with source,
 browser/platform and delivered production-file digests retained.
 
-Current-source hosted CI checks 231 module/script controls,
-35 Chrome scenarios against the production bundle, all 35 original isolated contract events, fresh
+Current-source hosted CI checks 233 module/script controls,
+36 Chrome scenarios against the production bundle, all 35 original isolated contract events, fresh
 contract/ABI drift checks, TypeScript and production build. Wider format/size,
 browser/platform, concurrent modal/tab/crash, real wallet/provider/NoM and
 maintainer/operator/release requirements remain open. All original roadmap

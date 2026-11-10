@@ -1110,13 +1110,19 @@ onBeforeUnmount(() => {
 })
 
 function onDragOver(e: DragEvent) {
-  if ([...(e.dataTransfer?.items ?? [])].some((i) => i.kind === 'file')) e.preventDefault()
+  if (e.dataTransfer?.types.includes('Files')) e.preventDefault()
 }
 function onDrop(e: DragEvent) {
-  const file = [...(e.dataTransfer?.files ?? [])].find(isImage)
-  if (!file) return
+  const files = e.dataTransfer?.files
+  if (!files?.length) return
+  // File drags are accepted by the board. Keep unsupported files from
+  // falling through to the browser's default file-drop action.
   e.preventDefault()
-  emit('drop-image', file)
+  for (const file of files) {
+    if (!isImage(file)) continue
+    emit('drop-image', file)
+    break
+  }
 }
 
 const zoomLabel = computed(() => (hud.zoom >= 1 ? `${Math.round(hud.zoom * 100)}%` : `${Math.round(hud.zoom * 100)}%`))

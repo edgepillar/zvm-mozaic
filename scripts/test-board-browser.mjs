@@ -30,7 +30,7 @@ const routerPaint = {address: R, blockNumber: '0x9', transactionHash: TX, transa
   topics: [topic('PaintedBy(address,address,uint256)'), addressTopic(ARTIST), addressTopic(ARTIST)], data: encodeAbiParameters([{type: 'uint256'}], [1n])}
 const DETAIL_CASES = ['late-history-details','late-router-details','live-details','history-unavailable-details','unavailable-details']
 const GESTURE_CASES = ["pointer-cancel", "held-pointer-context", "pinch-spray", "deferred-route", "view-dimensions"]
-const IMAGE_CASES = ['image-stamp', 'image-close', 'image-replace-guide', 'image-close-pending', 'image-drop', 'image-alpha-count', 'image-stamp-overlap', 'image-tall-preview', 'image-paste-svg', 'image-source-budget']
+const IMAGE_CASES = ['image-stamp', 'image-close', 'image-replace-guide', 'image-close-pending', 'image-drop', 'image-alpha-count', 'image-stamp-overlap', 'image-tall-preview', 'image-paste-svg', 'image-source-budget', 'image-transfer-budget']
 const MODAL_CASES = ['image-queued-close', 'image-native-escape', 'node-modal-queued-close']
 function detailPaint({block = 9, painter = ARTIST, transaction = TX, rgb = 0x112233} = {}) {
   const packed = '0x' + DETAIL_INDEX.toString(16).padStart(6, '0') + rgb.toString(16).padStart(6, '0')
@@ -430,6 +430,39 @@ async function chooseEncodedImage(page, bytes, name, type, total = bytes.length)
   }, {encoded: bytes.toString('base64'), name, type, total})
 }
 
+async function transferFile(page, bytes, name, type = '', total = bytes.length) {
+  return page.evaluateHandle(({encoded, name, type, total}) => {
+    const header = Uint8Array.from(atob(encoded), character => character.charCodeAt(0))
+    return new File([header, new Uint8Array(total - header.length)], name, {type})
+  }, {encoded: bytes.toString('base64'), name, type, total})
+}
+
+async function boardTransfer(page, route, file, {mixed = false, closeNow = false} = {}) {
+  return page.evaluate(async (route, file, mixed, closeNow) => {
+    const canvas = document.querySelector('[data-testid="board"]')
+    const transfer = new DataTransfer()
+    transfer.setData('text/plain', 'Controlled text')
+    if (mixed) transfer.items.add(new File(['Controlled file'], 'note.txt', {type: 'text/plain'}))
+    if (file) transfer.items.add(file)
+    const eventOptions = {bubbles: true, cancelable: true}
+    const drag = route === 'drop' ? new DragEvent('dragover', {...eventOptions, dataTransfer: transfer}) : null
+    if (drag) canvas.dispatchEvent(drag)
+    const event = drag ? new DragEvent('drop', {...eventOptions, dataTransfer: transfer})
+      : new ClipboardEvent('paste', {...eventOptions, clipboardData: transfer})
+    canvas.dispatchEvent(event)
+    if (closeNow) {
+      // Allow Vue to open the actual modal and pass the file to its post-flush
+      // watcher. Close in this task before an image can publish a preview.
+      await Promise.resolve()
+      const close = document.querySelector('dialog[open] button[title="Close"]')
+      if (!close) throw new Error('The transferred file did not open the native dialog')
+      close.click()
+    }
+    return {route, defaultPrevented: event.defaultPrevented, dragOverPrevented: drag?.defaultPrevented ?? null,
+      closedInDispatchTask: closeNow, file: file ? {name: file.name, type: file.type, bytes: file.size} : null}
+  }, route, file, mixed, closeNow)
+}
+
 async function smallImage(page) {
   await page.waitForSelector('dialog[open] [data-testid="as-stamp"]', {visible: true})
   await page.focus('[data-testid="image-width"]'); await page.keyboard.press('Home')
@@ -502,7 +535,7 @@ async function failureDetail(error, state, page) {
 try {
   browser = await puppeteer.launch({executablePath, headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--no-first-run']})
   const browserVersion = await browser.version()
-  for (const name of ['old-head', 'old-totals', 'late-router', 'unavailable', 'old-chunk', 'old-history', 'old-log-error', 'canvas-switch', 'draft-context', 'draft-fast-return', 'draft-storage-reload', 'legacy-storage-migration', 'late-history-details', 'late-router-details', 'live-details', 'history-unavailable-details', 'unavailable-details', 'pointer-cancel', 'held-pointer-context', 'pinch-spray', 'deferred-route', 'view-dimensions', 'image-stamp', 'image-close', 'image-replace-guide', 'image-close-pending', 'image-drop', 'image-queued-close', 'image-native-escape', 'node-modal-queued-close', 'image-alpha-count', 'image-stamp-overlap', 'image-tall-preview', 'image-paste-svg', 'image-source-budget']) {
+  for (const name of ['old-head', 'old-totals', 'late-router', 'unavailable', 'old-chunk', 'old-history', 'old-log-error', 'canvas-switch', 'draft-context', 'draft-fast-return', 'draft-storage-reload', 'legacy-storage-migration', 'late-history-details', 'late-router-details', 'live-details', 'history-unavailable-details', 'unavailable-details', 'pointer-cancel', 'held-pointer-context', 'pinch-spray', 'deferred-route', 'view-dimensions', 'image-stamp', 'image-close', 'image-replace-guide', 'image-close-pending', 'image-drop', 'image-queued-close', 'image-native-escape', 'node-modal-queued-close', 'image-alpha-count', 'image-stamp-overlap', 'image-tall-preview', 'image-paste-svg', 'image-source-budget', 'image-transfer-budget']) {
     active = {name, held: new Map(), calls: [], contractCalls: []}; const state = active
     console.log('MOZAIC-BOARD-BROWSER-START ' + JSON.stringify({case: name, source}))
     const context = await browser.createBrowserContext(), page = await context.newPage()
@@ -1139,6 +1172,88 @@ try {
         actualSmallBMPRecovery: acceptedBMP, actualSmallAVIFRecovery: acceptedAVIF,
         actualSmallICORecovery: acceptedICO, actualSmallCURRecovery: acceptedCUR,
         actualDisplayedPixelsAfterRecovery: 8, actualDraftPixels: 0, pass: true})
+    } else if (name === 'image-transfer-budget') {
+      state.phase = 'actual file drop and clipboard raster admission'
+      await waitStats(page, 5, 6); await quiet(page); await badge(page, 0)
+      const session = await page.createCDPSession(), urls = new Set()
+      await session.send('Network.enable'); await session.send('Page.enable')
+      let pickerCount = 0
+      session.on('Network.requestWillBeSent', event => {
+        if (event.request.url.startsWith('blob:' + origin + '/')) urls.add(event.request.url)
+      })
+      session.on('Page.fileChooserOpened', () => { pickerCount++ })
+      await session.send('Page.setInterceptFileChooserDialog', {enabled: true})
+      const handles = []
+      const file = async (...args) => {
+        const handle = await transferFile(page, ...args)
+        handles.push(handle)
+        return handle
+      }
+      const waitClosed = () => page.waitForFunction(() => !document.querySelector('dialog[open]'))
+      const closeImage = async () => {
+        await page.click('dialog[open] button[title="Close"]')
+        await waitClosed()
+      }
+      const transfer = async (route, value, options) => {
+        const seen = await boardTransfer(page, route, value, options)
+        assert.equal(seen.defaultPrevented, true)
+        assert.equal(seen.dragOverPrevented, route === 'drop' ? true : null)
+        return seen
+      }
+      try {
+        const text = await boardTransfer(page, 'drop', null)
+        const unsupported = await boardTransfer(page, 'drop', null, {mixed: true})
+        const pasteText = await boardTransfer(page, 'paste', null, {mixed: true})
+        assert.deepEqual([text.dragOverPrevented, text.defaultPrevented], [false, false])
+        assert.deepEqual([unsupported.dragOverPrevented, unsupported.defaultPrevented], [true, true])
+        assert.equal(pasteText.defaultPrevented, false)
+        await quietExceptHeld(page)
+        assert.equal(await page.$('dialog[open]'), null); assert.equal(urls.size, 0)
+
+        const overBytes = await file(Buffer.alloc(0), 'over-transfer-byte-limit.bmp', '', 32 * 1024 * 1024 + 1)
+        const bmp = budgetBMP(4001, -4000), small = budgetBMP(4, -2)
+        const overBMP = await file(bmp.header, 'over-transfer-bitmap-limit.bmp', '', bmp.total)
+        const overAVIF = await file(readFileSync('test/fixtures/budget-large.avif'), 'over-transfer-primary-limit.avif')
+        const tinyBMP = await file(small.header, 'transfer-recovery.bmp', '', small.total)
+        const tinyAVIF = await file(readFileSync('test/fixtures/budget-small.avif'), 'transfer-recovery.avif')
+        const byteErrors = [], pixelErrors = [], pendingCloses = [], recoveries = []
+        const reject = async (route, value, message) => {
+          const seen = await transfer(route, value, {mixed: true})
+          await page.waitForFunction(message => document.querySelector('dialog[open]')?.textContent.includes(message), {}, message)
+          assert.equal(await page.$('dialog[open] [data-testid="as-stamp"]'), null)
+          await quietExceptHeld(page); assert.equal(urls.size, 0)
+          await closeImage()
+          return seen
+        }
+        for (const [route, large, valid] of [['drop', overBMP, tinyBMP], ['paste', overAVIF, tinyAVIF]]) {
+          state.phase = route + ' source byte and raster pixel limits'
+          byteErrors.push(await reject(route, overBytes, 'Choose an image of 32 MiB or less.'))
+          pixelErrors.push(await reject(route, large, 'Choose a raster image with 16 million pixels or fewer.'))
+          state.phase = route + ' closes before a raster preview can publish'
+          pendingCloses.push(await transfer(route, valid, {mixed: true, closeNow: true}))
+          await waitClosed(); await quietExceptHeld(page)
+          assert.equal(urls.size, 0)
+        }
+        for (const [route, valid] of [['drop', tinyBMP], ['paste', tinyAVIF]]) {
+          state.phase = route + ' reopens with a valid raster preview'
+          const seen = await transfer(route, valid, {mixed: true})
+          await smallImage(page)
+          await page.waitForFunction(() => Array.from(document.querySelectorAll('dialog[open] p'))
+            .some(node => node.textContent.trim().startsWith('8 pixels.')))
+          await onlyImageURL({urls}, recoveries.length + 1)
+          recoveries.push({...seen, pixels: 8})
+          await closeImage()
+        }
+        await quietExceptHeld(page); await badge(page, 0)
+        assert.equal(pickerCount, 0); assert.equal(urls.size, 2)
+        results.push({case: name, textDrop: text, unsupportedFileDrop: unsupported, nonImagePaste: pasteText,
+          byteErrors, pixelErrors, pendingCloses, recoveries, actualSourceURLRequestsBeforeRecovery: 0,
+          actualSourceURLRequestsForRecovery: urls.size, actualUnwantedNativeFileChoosers: pickerCount,
+          controlledDragAndClipboardEvents: true, actualDraftPixels: 0, pass: true})
+      } finally {
+        await session.send('Page.setInterceptFileChooserDialog', {enabled: false})
+        await Promise.all(handles.map(handle => handle.dispose()))
+      }
     } else {
       await waitStats(page, 5, 6); await quiet(page); await changeNode(page, '')
       await page.waitForFunction(() => {const rows = Array.from(document.querySelectorAll('.stats-body b'), node => node.textContent.trim()); return rows[0] === '-' && rows[2] === '-'})
@@ -1163,12 +1278,12 @@ try {
   }
   console.log('MOZAIC-BOARD-BROWSER-AGGREGATE ' + JSON.stringify({source, attempted: 35, passed: results.length, failures}))
   assert.deepEqual(failures, [], 'All independent production scenarios must pass')
-  assert.equal(results.length, 35); assert.deepEqual(errors, []); assert.deepEqual(unexpected, [])
+  assert.equal(results.length, 36); assert.deepEqual(errors, []); assert.deepEqual(unexpected, [])
   assert.ok(delivered.has('index.html') && Array.from(delivered.keys()).some(name => name.endsWith('.js')))
-  console.log('MOZAIC-BOARD-BROWSER-SUMMARY ' + JSON.stringify({schema: 1, source, cases: 35, passed: 35, failed: 0,
+  console.log('MOZAIC-BOARD-BROWSER-SUMMARY ' + JSON.stringify({schema: 1, source, cases: 36, passed: 36, failed: 0,
     browserVersion, nodeVersion: process.version, platform: process.platform, architecture: process.arch,
     actualProductPageVisibility: 'visible', independentScenarioFailuresCollectedBeforeFinalVerdict: true,
-    actualProductionEntryRoutes: ['canvas', 'gallery'], actualDraftPixelsPreserved: 1, actualIndexedDBAndLegacyStorage: true, nativeStorageLockCases: 3, actualDraftReloadCases: 1, actualPixelDetailCases: 5, stationaryPointerDetailCases: 2, actualGestureAndNavigationCases: 5, actualTouchInputCases: 3, actualRouteTimerBoundaryCases: 1, actualSmallCanvasCases: 1, actualImageImportCases: 12, actualImageBudgetCases: 1, actualBrowserClipboardEventCases: 1, actualNativePictureSizeCases: 1, actualNativeAlphaCountCases: 1, actualNativeStampOverlapCases: 1, actualNativeFileDropCases: 3, actualNativeModalCases: 3, actualQueuedModalCloseCases: 2, actualNativeEscapeCases: 2, actualNativePNGPlacementCases: 3, actualNativeSVGResourceCases: 5, actualExplicitObjectURLLifetimeCases: 6, actualPendingImportCloseCases: 1,
+    actualProductionEntryRoutes: ['canvas', 'gallery'], actualDraftPixelsPreserved: 1, actualIndexedDBAndLegacyStorage: true, nativeStorageLockCases: 3, actualDraftReloadCases: 1, actualPixelDetailCases: 5, stationaryPointerDetailCases: 2, actualGestureAndNavigationCases: 5, actualTouchInputCases: 3, actualRouteTimerBoundaryCases: 1, actualSmallCanvasCases: 1, actualImageImportCases: 13, actualImageBudgetCases: 1, actualImageTransferBudgetCases: 1, actualBrowserClipboardEventCases: 2, actualNativePictureSizeCases: 1, actualNativeAlphaCountCases: 1, actualNativeStampOverlapCases: 1, actualNativeFileDropCases: 4, actualNativeModalCases: 3, actualQueuedModalCloseCases: 2, actualNativeEscapeCases: 2, actualNativePNGPlacementCases: 3, actualNativeSVGResourceCases: 5, actualExplicitObjectURLLifetimeCases: 6, actualPendingImportCloseCases: 2,
     servedBuildFiles: Object.fromEntries(Array.from(delivered).sort()), unexpectedExternalRequests: 0, pageOrFixtureErrors: 0,
     walletProvidersConnected: 0, publicNetworkOrRealNoMExecution: false, sourceTestHooksOrProductModuleReplacements: 0}))
 } catch (error) {

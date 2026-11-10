@@ -14,6 +14,10 @@ export async function fixture(options = {}) {
   const input = /<canvas\b[^>]*data-testid="board"[^>]*\/>/s.exec(text)?.[0]
   if (!input) throw new Error('The actual board input canvas is missing')
   const handlers = Object.fromEntries([...input.matchAll(/@(pointerdown|pointermove|pointerup|pointercancel|lostpointercapture|pointerleave|wheel)="(\w+)"/g)].map(m => [m[1], m[2]]))
+  const boardHost = /<div ref="host"[^>]*>/.exec(text)?.[0]
+  if (!boardHost) throw new Error('The actual board host is missing')
+  const fileHandlers = Object.fromEntries([...boardHost.matchAll(/@(dragover|drop)="(\w+)"/g)].map(m => [m[1], m[2]]))
+  const emitted = []
   let scope = 'a', next = 1, now = 0, seed = 7, width = options.width ?? 1000, height = options.height ?? 1000
   const timers = new Map(), raf = new Map(), watches = [], mounted = [], unmounted = []
   const windowEvents = new Map(), documentEvents = new Map(), frames = [], writes = [], strokes = []
@@ -75,7 +79,7 @@ export async function fixture(options = {}) {
     clearTimeout: id => timers.delete(id), clearInterval: id => timers.delete(id),
     requestAnimationFrame(fn) {const id = next++; raf.set(id, fn); return id}, cancelAnimationFrame: id => raf.delete(id),
     defineProps: () => ({bare: !!options.bare}), withDefaults: (props, defaults) => ({...defaults, ...props}),
-    defineEmits: () => () => {}, defineExpose(value) {Object.assign(exposed, value)}}
+    defineEmits: () => (...args) => {emitted.push(args)}, defineExpose(value) {Object.assign(exposed, value)}}
   const context = createContext(globals)
   const modules = new Map()
   const synthetic = (name, value) => {
@@ -88,7 +92,7 @@ export async function fixture(options = {}) {
       colorAt: i => options.background?.(i) ?? 0xffffff, whoPainted: () => null, onChanged: on('changed'), onAttributionChanged: on('attribution'), onArrived: on('arrived')},
     '../core/draft': draft,
     '../core/prefs': {prefs, axis: {x: 500, y: 500}, used: color => usedColors.push(color), putDown() {}},
-    '../core/image': {guide, stamp, isImage: () => false, pixelsOf: options.pixelsOf ?? (() => [])},
+    '../core/image': {guide, stamp, isImage: options.isImage ?? (() => false), pixelsOf: options.pixelsOf ?? (() => [])},
     '../core/chain': {chain}, '../core/format': {same: (a, b) => !!a && !!b && a.toLowerCase() === b.toLowerCase()},
     '../core/endpoint': {endpoint, explorerUrl: () => null}, '../core/wallet': {wallet: {address: null}}}
   const load = async url => {
@@ -106,7 +110,7 @@ export async function fixture(options = {}) {
     if (name === './color') return load(new URL('color.ts', parent.identifier))
     throw new Error('Undeclared view capability: ' + name)
   }
-  const tail = `\nexport const __handlers = {${Object.entries(handlers).map(([key, value]) => JSON.stringify(key) + ':' + value).join(',')}};
+  const tail = `\nexport const __handlers = {${Object.entries({...handlers, ...fileHandlers}).map(([key, value]) => JSON.stringify(key) + ':' + value).join(',')}};
 export function __attach(a,b,c) {host.value=a;cv.value=b;mini.value=c}
 export function __state() {return {mode,panning,space,start,last,strokeEnd,preview:!!preview,region:region.length,pointers:pointers.size,pinch:!!pinch,fresh:fresh.length,located:!!located,glide:!!glide,hover,picked:picked.value,view:[scale,ox,oy],previewFrame,urlTimer,miniTimer}}
 `
@@ -122,7 +126,7 @@ export function __state() {return {mode,panning,space,start,last,strokeEnd,previ
       preventDefault() {}, ...values})
     flush(); return true
   }
-  return {dispatch, prefs, board, endpoint, chain, writes, strokes, timers, raf, captures, history, location, exposed, usedColors,
+  return {dispatch, prefs, board, endpoint, chain, writes, strokes, timers, raf, captures, history, location, exposed, usedColors, emitted,
     state: () => JSON.parse(JSON.stringify(module.namespace.__state())),
     screen(x, y) {const [s, ox, oy] = module.namespace.__state().view; return {clientX: ox + (x + 0.5) * s, clientY: oy + (y + 0.5) * s}},
     flush,

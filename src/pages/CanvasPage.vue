@@ -36,6 +36,11 @@ function openImport(file: File | null = null) {
   importing.value = true
 }
 
+function closeImport() {
+  importing.value = false
+  importFile.value = null
+}
+
 function mirror(which: 'x' | 'y') {
   const on = which === 'x' ? !prefs.mirrorX : !prefs.mirrorY
   if (on && view.value) {
@@ -288,7 +293,7 @@ const centre = () => view.value?.centre() ?? {x: 500, y: 500}
       </div>
     </aside>
 
-    <ImportDialog :open="importing" :file="importFile" :at="centre()" @close="importing = false" />
+    <ImportDialog :open="importing" :file="importFile" :at="centre()" @close="closeImport" />
     <ShortcutsDialog :open="keys" @close="keys = false" />
   </div>
 </template>
