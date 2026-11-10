@@ -1330,10 +1330,11 @@ try {
       await waitFocus(node)
       await page.waitForFunction(() => !document.querySelector('dialog[open]'))
 
-      state.phase = 'keyboard help beneath a pasted image dialog'
+      state.phase = 'keyboard help initial focus and accessible name'
       await page.focus(help); await page.keyboard.press('Enter')
       await waitFocus('dialog[open] button[title="Close"]')
       axNames.push(await dialogAccessibleName(page, session, 'Keyboard'))
+      state.phase = 'paste opens the image preview above keyboard help'
       const paste = await page.evaluate(() => {
         const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="4" height="2"><rect width="4" height="2" fill="red"/></svg>'
         const file = new File([svg], 'focus-stack.svg', {type: 'image/svg+xml'})
@@ -1345,16 +1346,24 @@ try {
       })
       assert.equal(paste.prevented, true)
       await page.waitForFunction(() => document.querySelectorAll('dialog[open]').length === 2 &&
-        [...document.querySelectorAll('dialog[open] p')].some(node => node.textContent.trim().startsWith('8 pixels.')))
+        document.querySelector('dialog[open] [data-testid="as-stamp"]') !== null)
       axNames.push(await dialogAccessibleName(page, session, 'Bring in an image'))
       const imageFocus = () => page.evaluate(() => document.activeElement?.closest('dialog')?.querySelector('h2')?.textContent.trim())
       assert.equal(await imageFocus(), 'Bring in an image')
+      state.phase = 'top dialog Tab and Home set the preview width'
       const imageInitial = await focused()
       await page.keyboard.press('Tab')
       const imageForward = await focused()
+      assert.equal(imageForward, 'image-width')
+      await page.keyboard.press('Home')
+      const widthAfterHome = await page.$eval('dialog[open] [data-testid="image-width"]', input => input.valueAsNumber)
+      assert.equal(widthAfterHome, 4)
+      await page.waitForFunction(() => [...document.querySelectorAll('dialog[open] p')]
+        .some(node => node.textContent.trim().startsWith('8 pixels.')))
       await tabBackward()
       const imageBack = await focused()
       assert.deepEqual([imageInitial, imageForward, imageBack], ['Close', 'image-width', 'Close'])
+      state.phase = 'the lower dialog and page are inert'
       const inert = await page.evaluate(help => {
         const active = document.activeElement
         const lower = [...document.querySelectorAll('dialog[open]')].find(el => el.querySelector('h2')?.textContent.trim() === 'Keyboard')
@@ -1364,10 +1373,12 @@ try {
         return {lowerInert, pageInert: document.activeElement === active}
       }, help)
       assert.deepEqual(inert, {lowerInert: true, pageInert: true})
+      state.phase = 'top Escape restores keyboard help focus'
       await page.keyboard.press('Escape')
       await page.waitForFunction(() => document.querySelectorAll('dialog[open]').length === 1 &&
         document.activeElement?.getAttribute('title') === 'Close' &&
         document.activeElement?.closest('dialog')?.querySelector('h2')?.textContent.trim() === 'Keyboard')
+      state.phase = 'lower Escape restores invoker focus'
       await page.keyboard.press('Escape')
       await waitFocus(help)
       await page.waitForFunction(() => !document.querySelector('dialog[open]'))
@@ -1376,7 +1387,7 @@ try {
         actualNodeFocusSequence: [nodeInitialFocus, nodeBack, nodeForward], actualNodeFocusRestored: true,
         actualImageFocusSequence: [imageInitial, imageForward, imageBack], actualModalInertness: inert,
         actualTopEscapeRestoredLowerFocus: true, actualLowerEscapeRestoredInvoker: true,
-        controlledClipboardFixture: paste, actualNestedPreviewPixels: 8, actualDraftPixels: 0, pass: true})
+        controlledClipboardFixture: paste, actualKeyboardHomeSetWidth: widthAfterHome, actualNestedPreviewPixels: 8, actualDraftPixels: 0, pass: true})
     } else {
       await waitStats(page, 5, 6); await quiet(page); await changeNode(page, '')
       await page.waitForFunction(() => {const rows = Array.from(document.querySelectorAll('.stats-body b'), node => node.textContent.trim()); return rows[0] === '-' && rows[2] === '-'})
