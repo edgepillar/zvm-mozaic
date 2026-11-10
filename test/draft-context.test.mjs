@@ -12,9 +12,10 @@ const bytes = rows => Uint8Array.from(rows.flatMap(([i, c]) => [i >> 16, i >> 8 
 const entries = data => {const out = []; for (let o = 0; o + 6 <= data.length; o += 6) out.push([(data[o]<<16)|(data[o+1]<<8)|data[o+2], (data[o+3]<<16)|(data[o+4]<<8)|data[o+5]]); return out}
 function deferred() {let resolve, reject; const promise = new Promise((yes, no) => {resolve = yes; reject = no}); return {promise, resolve, reject}}
 
-async function fixture({autoPut = true} = {}) {
+async function fixture({autoPut = true, saved = new Map()} = {}) {
   let track = null, now = 0, next = 0, W = 10, H = 10, boardModule
-  const watches = [], queued = new Set(), frames = new Map(), timers = new Map(), reads = [], writes = [], saved = new Map(), legacy = new Map(), toasts = []
+  const watches = [], queued = new Set(), frames = new Map(), timers = new Map(), reads = [], writes = [], legacy = new Map(), toasts = [], events = new Map()
+  const addEventListener = (name, fn) => events.set(name, fn)
   const reactive = value => new Proxy(value, {
     get(target, name) {if (track) track.push([target, name]); return target[name]},
     set(target, name, value) {if (Object.is(target[name], value)) return true; target[name] = value
@@ -28,19 +29,26 @@ async function fixture({autoPut = true} = {}) {
   const watch = (get, callback, options) => {const w = {get, callback, options, deps: []}; w.value = read(w); watches.push(w)}
   const board = reactive({status: 'idle', syncedTo: 0, width: 0, height: 0})
   const endpoint = reactive({rpc: 'http://alpha.invalid/rpc', chainId: 1, contract: A, canvas: {width: W, height: H}})
-  const context = createContext({Uint8Array, Uint32Array, Uint8ClampedArray, Int32Array,
-    document: {createElement(tag) {assert.equal(tag, 'canvas'); return {width: 0, height: 0, getContext: () => ({putImageData() {}})}}},
+  const document = {visibilityState: 'visible', addEventListener,
+    createElement(tag) {assert.equal(tag, 'canvas'); return {width: 0, height: 0, getContext: () => ({putImageData() {}})}}}
+  const context = createContext({Uint8Array, Uint32Array, Uint8ClampedArray, Int32Array, document,
     ImageData: class {constructor(w, h) {this.data = new Uint8ClampedArray(w*h*4); this.width = w; this.height = h}},
     requestAnimationFrame(fn) {const id = ++next; frames.set(id, fn); return id},
-    clearTimeout(id) {timers.delete(id)}, window: {setTimeout(fn, delay) {const id = ++next; timers.set(id, {at: now + delay, fn}); return id}},
+    clearTimeout(id) {timers.delete(id)}, window: {addEventListener, setTimeout(fn, delay) {const id = ++next; timers.set(id, {at: now + delay, fn}); return id}},
     localStorage: {getItem: k => legacy.get(k) ?? null, removeItem: k => legacy.delete(k)},
   })
   const ports = {
     vue: {reactive, watch}, './board': {board, colorAt: () => 0xffffff, onChanged: () => () => {}, W, H},
     './endpoint': {endpoint}, './toast': {toast: (...args) => toasts.push(args)},
     './idb': {get(k) {const d = deferred(); reads.push({key: k, ...d}); return d.promise},
-      put(k, data) {const d = deferred(), row = {key: k, bytes: Uint8Array.from(data), ...d}; writes.push(row)
-        if (autoPut) {saved.set(k, row.bytes); row.resolve()}; return row.promise}},
+      put(k, data) {
+        if (typeof data === 'function') {
+          try {data = data(saved.get(k) ?? null)} catch (error) {return Promise.reject(error)}
+        }
+        const d = deferred(), row = {key: k, bytes: data === null ? null : Uint8Array.from(data), ...d}; writes.push(row)
+        if (autoPut) {if (row.bytes !== null) saved.set(k, row.bytes); row.resolve()}
+        return row.promise
+      }},
   }
   const linked = new Map()
   const module = new SourceTextModule(stripTypeScriptTypes(readFileSync(new URL('../src/core/draft.ts', import.meta.url), 'utf8'), {mode: 'strip'}), {context})
@@ -60,20 +68,22 @@ async function fixture({autoPut = true} = {}) {
     board.status = 'loading'; W = width; H = height; boardModule.setExport('W', W); boardModule.setExport('H', H); board.width = W; board.height = H
     await flush(); board.status = 'ready'; await flush()
   }
-  const answer = async (row, data = null) => {assert.ok(row); row.resolve(data); await tick()}
+  const answer = async (row, data = null) => {assert.ok(row); if (data !== null) saved.set(row.key, data); row.resolve(data); await tick()}
   const draw = (i, c = 0x112233) => {api.beginStroke(); api.put(i % W, Math.floor(i / W), c); api.endStroke()}
-  const loaded = async (values = {}) => {await transition(values); await answer(reads.at(-1)); await frame()}
+  const loaded = async (values = {}, data = null) => {await transition(values); await answer(reads.at(-1), data); await frame()}
   return {api, board, endpoint, reads, writes, legacy, saved, toasts, timers, frames, transition, answer, draw, loaded, flush, frame, advance,
     async failRead(row) {row.reject(new Error('Controlled read failure')); await tick()},
-    async commit(row) {saved.set(row.key, row.bytes); row.resolve(); await tick()},
+    async commit(row) {if (row.bytes !== null) saved.set(row.key, row.bytes); row.resolve(); await tick()},
+    async hide() {document.visibilityState = 'hidden'; events.get('visibilitychange')(); await tick()},
+    async pagehide() {events.get('pagehide')(); await tick()},
     async abort(row) {row.reject(new Error('Controlled transaction abort')); await tick()},
     outgoing: () => Array.from(api.outgoing(), p => [p.index, p.rgb]),
   }
 }
 
 async function idbFixture() {
-  const transactions = [], opening = {}, context = createContext({indexedDB: {open(name, version) {assert.equal(name, 'mozaic'); assert.equal(version, 1); return opening}}})
-  const db = {transaction(name, mode) {assert.equal(name, 'kv'); const req = {}, row = {mode, req, error: null,
+  const transactions = [], opening = {}, context = createContext({Uint8Array, indexedDB: {open(name, version) {assert.equal(name, 'mozaic'); assert.equal(version, 1); return opening}}})
+  const db = {transaction(name, mode) {assert.equal(name, 'kv'); const req = {}, row = {mode, req, error: null, abort() {row.aborted = true; row.onabort()},
     objectStore: () => ({get: k => {row.key = k; return req}, put: (v, k) => {row.key = k; row.value = v; return req}, delete: k => {row.key = k; row.deleted = true; return req}})}
     transactions.push(row); return row}}
   const m = new SourceTextModule(stripTypeScriptTypes(readFileSync(new URL('../src/core/idb.ts', import.meta.url), 'utf8'), {mode: 'strip'}), {context})
@@ -154,6 +164,82 @@ if (baseline) {
   test('malformed legacy bytes remain untouched', async () => {const f = await fixture(); f.legacy.set('mozaic.' + key(), 'not-valid-hex'); await f.loaded(); await f.advance(1200); assert.equal(f.legacy.get('mozaic.' + key()), 'not-valid-hex')})
   test('clearing a draft writes an empty value only under its own key', async () => {const f = await fixture(); await f.loaded(); f.draw(1); await f.frame(); await f.advance(1200); f.api.clearDraft(); await f.frame(); await f.advance(1200); assert.equal(f.writes.at(-1).key, key()); assert.equal(f.writes.at(-1).bytes.length, 0)})
   test('saved indices and cached layers obey the current canvas bounds', async () => {const f = await fixture(); await f.transition({width: 2, height: 2}); await f.answer(f.reads[0], bytes([[0, 0x112233], [4, 0xaabbcc]])); await f.frame(); assert.deepEqual(f.outgoing(), [[0, 0x112233]]); f.draw(3); await f.transition({rpc: 'http://smaller.invalid/rpc', width: 1, height: 1}); await f.frame(); assert.deepEqual(f.outgoing(), [[0, 0x112233]])})
+  test('two loaded tabs retain disjoint edits under the same key', async () => {
+    const saved = new Map(), a = await fixture({saved}), b = await fixture({saved})
+    await a.loaded(); await b.loaded()
+    a.draw(1, 0x112233); await a.frame(); await a.advance(1200)
+    b.draw(2, 0x445566); await b.frame(); await b.advance(1200)
+    assert.deepEqual(entries(saved.get(key())), [[1, 0x112233], [2, 0x445566]])
+  })
+  test('a stale tab does not restore an erased pixel or save an unchanged view', async () => {
+    const initial = bytes([[1, 0xff0000]]), saved = new Map()
+    const a = await fixture({saved}), b = await fixture({saved})
+    await a.loaded({}, initial); await b.loaded({}, initial)
+    a.api.clearDraft(); await a.frame(); await a.advance(1200)
+    b.api.schedule(); await b.frame(); await b.advance(1200)
+    assert.equal(b.writes.length, 0)
+    b.draw(2, 0x445566); await b.frame(); await b.advance(1200)
+    assert.deepEqual(entries(saved.get(key())), [[2, 0x445566]])
+    b.draw(1, 0x0000ff); await b.frame(); await b.advance(1200)
+    assert.deepEqual(entries(saved.get(key())), [[1, 0x0000ff], [2, 0x445566]])
+  })
+  test('a failed batch retries with the newer edits and keeps the untouched deltas', async () => {
+    const f = await fixture({autoPut: false}); await f.loaded()
+    f.draw(1); f.draw(2); await f.frame(); await f.advance(1200)
+    f.draw(1, 0xff0000); f.draw(3); await f.frame(); await f.advance(1200)
+    assert.equal(f.writes.length, 1)
+    await f.abort(f.writes[0]); assert.equal(f.writes.length, 2)
+    await f.commit(f.writes[1])
+    assert.deepEqual(entries(f.saved.get(key())), [[1, 0xff0000], [2, 0x112233], [3, 0x112233]])
+  })
+  test('sent and failed pixels respect committed colours from another tab', async () => {
+    const f = await fixture(), sent = [{index: 1, rgb: 0x112233}, {index: 2, rgb: 0x445566}]
+    await f.loaded({}, bytes([[1, sent[0].rgb], [2, sent[1].rgb]]))
+    f.saved.set(key(), bytes([[1, 0xff0000], [2, sent[1].rgb]]))
+    f.api.markSent(sent); await f.frame(); await f.advance(1200)
+    assert.deepEqual(entries(f.saved.get(key())), [[1, 0xff0000]])
+    f.api.markFailed(sent); await f.frame(); await f.advance(1200)
+    assert.deepEqual(entries(f.saved.get(key())), [[1, 0xff0000], [2, sent[1].rgb]])
+  })
+  test('a hidden or departing tab submits edits before the next animation frame', async () => {
+    const f = await fixture(); await f.loaded(); f.draw(1)
+    assert.equal(f.writes.length, 0)
+    await f.hide()
+    assert.deepEqual(entries(f.saved.get(key())), [[1, 0x112233]])
+    f.draw(2); await f.pagehide()
+    assert.deepEqual(entries(f.saved.get(key())), [[1, 0x112233], [2, 0x112233]])
+  })
+  test('an intentionally empty IndexedDB draft takes precedence over legacy bytes', async () => {
+    const f = await fixture()
+    f.legacy.set('mozaic.' + key(), Buffer.from(bytes([[1, 0xff0000]])).toString('hex'))
+    await f.loaded({}, bytes([])); assert.deepEqual(f.outgoing(), [])
+    await f.advance(1200)
+    assert.deepEqual(entries(f.saved.get(key())), [])
+    assert.equal(f.legacy.has('mozaic.' + key()), false)
+  })
+  test('merging an older draft keeps its last duplicate and out-of-view indices', async () => {
+    const f = await fixture()
+    await f.loaded({width: 2, height: 2}, bytes([[90, 0xaabbcc], [1, 0xff0000], [1, 0x00ff00]]))
+    f.draw(2, 0); await f.frame(); await f.advance(1200)
+    assert.deepEqual(entries(f.saved.get(key())), [[1, 0x00ff00], [2, 0], [90, 0xaabbcc]])
+  })
+  test('IndexedDB reads and writes the delta in one transaction and awaits completion', async () => {
+    const f = await idbFixture(), previous = bytes([[1, 0x112233]]), next = bytes([[1, 0x112233], [2, 0x445566]])
+    let committed = false
+    const pending = f.api.put(key(), current => {assert.equal(current, previous); return next}).then(() => {committed = true})
+    await f.open(); const t = f.transactions[0]
+    assert.equal(t.mode, 'readwrite'); assert.equal(t.value, undefined)
+    await f.success(t, previous)
+    assert.equal(f.transactions.length, 1); assert.equal(t.value, next); assert.equal(committed, false)
+    await f.commit(t); await pending; assert.equal(committed, true)
+  })
+  test('an invalid current value aborts the IndexedDB edit before writing', async () => {
+    const f = await idbFixture(), malformed = new Uint8Array([1])
+    const pending = f.api.put(key(), current => {assert.equal(current, malformed); throw new Error('Invalid saved draft')})
+    const rejected = assert.rejects(pending, /Invalid saved draft/)
+    await f.open(); const t = f.transactions[0]; await f.success(t, malformed); await rejected
+    assert.equal(t.value, undefined); assert.equal(t.aborted, true)
+  })
   test('IndexedDB request success waits for transaction completion', async () => {const r = await requestBeforeCommit(); assert.equal(r.fulfilled(), false); await r.f.commit(r.t); await r.pending; assert.equal(r.fulfilled(), true)})
   test('IndexedDB abort after request success rejects the write', async () => {const f = await idbFixture(); const p = f.api.put(key(), bytes([[1, 0x112233]])); const rejected = assert.rejects(p, /aborted/); await f.open(); const t = f.transactions[0]; await f.success(t); t.onabort(); await rejected})
   test('IndexedDB request failures reject without a success claim', async () => {const f = await idbFixture(); const p = f.api.put(key(), bytes([])), rejected = assert.rejects(p, /request failed/); await f.open(); const t = f.transactions[0]; t.req.error = new Error('request failed'); t.req.onerror(); await rejected})

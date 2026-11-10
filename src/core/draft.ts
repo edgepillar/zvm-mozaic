@@ -175,12 +175,12 @@ onChanged(() => {
 })
 
 /** Every change to the draft goes through here, so the count stays right. */
-function write(i: number, rgb: number | undefined) {
+function write(i: number, rgb: number | undefined, edit = rgb === undefined ? ERASE : SET | rgb) {
   if (costs(i)) changed--
   if (rgb === undefined) draft.delete(i)
   else draft.set(i, rgb)
   if (costs(i)) changed++
-  if (ownsDraft() && !activeDraft!.record.loaded) activeDraft!.record.edited.add(i)
+  if (ownsDraft()) rememberEdit(activeDraft!.record, i, edit)
 }
 
 // --- strokes, undo and redo ------------------------------------------------------
@@ -316,7 +316,7 @@ export function outgoing(): Px[] {
 /** A batch has been signed and sent: it leaves the draft and shows as pending. */
 export function markSent(g: Px[]) {
   for (const p of g) {
-    if (draft.has[p.index] && draft.color[p.index] === p.rgb) write(p.index, undefined)
+    if (draft.has[p.index] && draft.color[p.index] === p.rgb) write(p.index, undefined, SENT | p.rgb)
     pending.set(p.index, p.rgb)
   }
   schedule()
@@ -327,7 +327,7 @@ export function markFailed(g: Px[]) {
   for (const p of g) {
     if (pending.get(p.index) !== p.rgb) continue
     pending.delete(p.index)
-    if (!draft.has[p.index]) write(p.index, p.rgb)
+    if (!draft.has[p.index]) write(p.index, p.rgb, RESTORE | p.rgb)
   }
   schedule()
 }
@@ -360,15 +360,60 @@ interface SavedDraft {
   has: Uint8Array
   color: Uint32Array
   size: number
-  edited: Set<number>
+  edits: Uint32Array | null
+  editedSinceFrame: boolean
   loaded: boolean
   reading: Promise<void> | null
   writing: Promise<void> | null
   timer: number | undefined
-  version: number
-  savedVersion: number
-  failedWrite: boolean
   legacy: string | null
+}
+
+// Encode an edit in one word. Zero means this tab has no change at that index.
+const RGB = 0xffffff
+const SET = 1 << 24
+const ERASE = 2 << 24
+const SENT = 3 << 24
+const RESTORE = 4 << 24
+
+function applyEdit(current: number, edit: number): number {
+  switch (edit & ~RGB) {
+    case SET: return edit
+    case ERASE: return 0
+    case SENT: return current === (SET | (edit & RGB)) ? 0 : current
+    case RESTORE: return current || (SET | (edit & RGB))
+    default: return current
+  }
+}
+
+function combineEdits(earlier: number, later: number): number {
+  if (!later) return earlier
+  if (!earlier || later <= ERASE || earlier > ERASE) return later
+  // A send or return after a local edit applies to that edited value.
+  return applyEdit(earlier === ERASE ? 0 : earlier, later) || ERASE
+}
+
+function rememberEdit(record: SavedDraft, i: number, edit: number) {
+  let edits = record.edits
+  if (!edits || i >= edits.length) {
+    const next = new Uint32Array(draft.has.length)
+    if (edits) next.set(edits)
+    edits = record.edits = next
+  }
+  edits[i] = combineEdits(edits[i], edit)
+  record.editedSinceFrame = true
+}
+
+function restoreEdits(record: SavedDraft, older: Uint32Array | null) {
+  if (!older) return
+  const newer = record.edits
+  if (!newer) record.edits = older
+  else if (newer.length > older.length) {
+    for (let i = 0; i < older.length; i++) newer[i] = combineEdits(older[i], newer[i])
+  } else {
+    for (let i = 0; i < newer.length; i++) older[i] = combineEdits(older[i], newer[i])
+    record.edits = older
+  }
 }
 
 // Keep only the active partition and unfinished/failed work. Detached arrays
@@ -388,67 +433,135 @@ function capture(record: SavedDraft) {
 }
 
 function release(record: SavedDraft) {
-  const safe = record.loaded ? !record.failedWrite && record.version === record.savedVersion :
-    record.size === 0 && record.edited.size === 0
+  const safe = !record.edits && record.legacy === null && (record.loaded || record.size === 0)
   if (activeDraft?.record !== record && safe && !record.reading && !record.writing &&
     record.timer === undefined && savedDrafts.get(record.key) === record) savedDrafts.delete(record.key)
 }
 
-function bytesOf(record: SavedDraft): Uint8Array {
-  // Count the captured membership itself: an edit can precede its next frame.
-  let count = 0
-  for (const present of record.has) count += present
+const validBytes = (value: unknown): value is Uint8Array => value instanceof Uint8Array && value.length % 6 === 0
+const indexAt = (bytes: Uint8Array, o: number) => (bytes[o] << 16) | (bytes[o + 1] << 8) | bytes[o + 2]
+const rgbAt = (bytes: Uint8Array, o: number) => (bytes[o + 3] << 16) | (bytes[o + 4] << 8) | bytes[o + 5]
+
+function mergeBytes(saved: Uint8Array | null, edits: Uint32Array): Uint8Array {
+  // Keep the last saved colour for each index, including older unordered rows.
+  const pixels = new Uint32Array(edits.length)
+  let outside = 0
+  if (saved) {
+    for (let o = 0; o < saved.length; o += 6) {
+      const i = indexAt(saved, o)
+      if (i < pixels.length) pixels[i] = SET | rgbAt(saved, o)
+      else outside++
+    }
+  }
+  let count = outside, changed = false
+  for (let i = 0; i < pixels.length; i++) {
+    if (edits[i]) {
+      const next = applyEdit(pixels[i], edits[i])
+      changed ||= next !== pixels[i]
+      pixels[i] = next
+    }
+    if (pixels[i]) count++
+  }
+  if (!changed && saved) return saved
   const bytes = new Uint8Array(count * 6)
   let o = 0
-  for (let i = 0; i < record.has.length; i++) {
-    if (!record.has[i]) continue
-    const c = record.color[i]
+  for (let i = 0; i < pixels.length; i++) {
+    const c = pixels[i]
+    if (!c) continue
     bytes[o++] = i >> 16
-    bytes[o++] = (i >> 8) & 0xff
-    bytes[o++] = i & 0xff
+    bytes[o++] = i >> 8
+    bytes[o++] = i
     bytes[o++] = c >> 16
-    bytes[o++] = (c >> 8) & 0xff
-    bytes[o++] = c & 0xff
+    bytes[o++] = c >> 8
+    bytes[o++] = c
+  }
+  // A smaller view of the same key owns none of the indices outside its bounds.
+  if (saved && outside) {
+    for (let p = 0; p < saved.length; p += 6) {
+      if (indexAt(saved, p) < pixels.length) continue
+      bytes.set(saved.subarray(p, p + 6), o)
+      o += 6
+    }
   }
   return bytes
 }
 
-function queueSave(record: SavedDraft) {
-  // A failed/unfinished read must never turn unknown saved data into an empty write.
-  if (!record.loaded) return
-  clearTimeout(record.timer)
-  record.timer = window.setTimeout(() => {
-    record.timer = undefined
-    const bytes = bytesOf(record), version = record.version
-    const previous = record.writing
-    const writing = (previous ?? Promise.resolve()).catch(() => {}).then(() => idb.put(record.key, bytes))
-    record.writing = writing
-    void writing.then(() => {
-      record.savedVersion = Math.max(record.savedVersion, version)
-      record.failedWrite = false
-      if (record.legacy !== null) {
-        try {
-          const key = `mozaic.${record.key}`
-          if (localStorage.getItem(key) === record.legacy) localStorage.removeItem(key)
-          record.legacy = null
-        } catch { /* keep blocked legacy storage untouched */ }
-      }
-    }, () => {
-      // Keep this partition in the tab, including across node/canvas changes.
-      record.failedWrite = true
-    }).finally(() => {
-      if (record.writing === writing) record.writing = null
-      release(record)
-    })
-  }, 1200)
+function readLegacy(key: string): string | null {
+  const value = localStorage.getItem(`mozaic.${key}`)
+  return value && value.length % 12 === 0 && /^[0-9a-f]+$/i.test(value) ? value : null
 }
+
+function legacyBytes(value: string): Uint8Array {
+  const bytes = new Uint8Array(value.length / 2)
+  for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(value.slice(i * 2, i * 2 + 2), 16)
+  return bytes
+}
+
+function flushSave(record: SavedDraft) {
+  clearTimeout(record.timer)
+  record.timer = undefined
+  if (!record.loaded || record.writing || (!record.edits && record.legacy === null)) return
+  const edits = record.edits
+  record.edits = null
+  record.editedSinceFrame = false
+  let legacy = record.legacy
+  const writing = idb.put(record.key, current => {
+    if (current !== null && !validBytes(current)) throw new Error('Invalid saved draft')
+    let bytes = current
+    if (bytes === null && legacy !== null) {
+      legacy = readLegacy(record.key)
+      if (legacy !== null) bytes = legacyBytes(legacy)
+    }
+    return edits ? mergeBytes(bytes, edits) : bytes
+  })
+  record.writing = writing
+  let drain = false
+  void writing.then(() => {
+    drain = true
+    record.legacy = null
+    if (legacy !== null) {
+      try {
+        const key = `mozaic.${record.key}`
+        if (localStorage.getItem(key) === legacy) localStorage.removeItem(key)
+      } catch { /* keep blocked legacy storage untouched */ }
+    }
+  }, () => {
+    // Retry alongside newer work, or leave the failed batch for the next edit
+    // or context change. Never spin while storage is unavailable.
+    drain = record.edits !== null
+    restoreEdits(record, edits)
+  }).finally(() => {
+    record.writing = null
+    if (drain && record.timer === undefined) flushSave(record)
+    release(record)
+  })
+}
+
+function queueSave(record: SavedDraft) {
+  if (!record.loaded || (!record.edits && record.legacy === null)) return
+  record.editedSinceFrame = false
+  if (document.visibilityState === 'hidden') {
+    flushSave(record)
+    return
+  }
+  clearTimeout(record.timer)
+  record.timer = window.setTimeout(() => flushSave(record), 1200)
+}
+
+function flushDrafts() {
+  for (const record of savedDrafts.values()) flushSave(record)
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flushDrafts()
+})
+window.addEventListener('pagehide', flushDrafts)
 
 function save() {
   if (!ownsDraft()) return
   const record = activeDraft!.record
   capture(record)
-  record.version++
-  queueSave(record)
+  if (record.editedSinceFrame) queueSave(record)
 }
 
 function publishSaved(record: SavedDraft) {
@@ -469,31 +582,26 @@ function readSaved(record: SavedDraft) {
       // a partition whose original bytes could not be read.
       return
     }
-    if (bytes !== null && (!(bytes instanceof Uint8Array) || bytes.length % 6 !== 0)) return
+    if (bytes !== null && !validBytes(bytes)) return
     try {
-      const legacy = localStorage.getItem(`mozaic.${record.key}`)
-      if (legacy && legacy.length % 12 === 0 && /^[0-9a-f]+$/i.test(legacy)) {
-        record.legacy = legacy
-        if (!bytes) bytes = Uint8Array.from(legacy.match(/../g)!, h => parseInt(h, 16))
-        record.version++
-      }
+      record.legacy = readLegacy(record.key)
+      if (bytes === null && record.legacy !== null) bytes = legacyBytes(record.legacy)
     } catch { /* blocked legacy storage is left untouched */ }
     if (bytes) {
       for (let o = 0; o + 6 <= bytes.length; o += 6) {
-        const i = (bytes[o] << 16) | (bytes[o + 1] << 8) | bytes[o + 2]
-        if (i >= record.has.length || record.edited.has(i)) continue
+        const i = indexAt(bytes, o)
+        if (i >= record.has.length || record.edits?.[i]) continue
         record.has[i] = 1
-        record.color[i] = (bytes[o + 3] << 16) | (bytes[o + 4] << 8) | bytes[o + 5]
+        record.color[i] = rgbAt(bytes, o)
       }
     }
     record.size = record.has.reduce((sum, present) => sum + present, 0)
     record.loaded = true
-    record.edited.clear()
     if (ownsDraft() && activeDraft!.record === record && record.size) {
       toast(`Your draft of ${record.size.toLocaleString()} pixels is back.`, 'info')
     }
     publishSaved(record)
-    if (record.version !== record.savedVersion) queueSave(record)
+    queueSave(record)
   })()
   record.reading = reading
   void reading.finally(() => {
@@ -508,7 +616,6 @@ watch(storageContext, () => {
   if (activeDraft) {
     const record = activeDraft.record
     capture(record)
-    record.version++
     queueSave(record)
     activeDraft = null
     release(record)
@@ -530,9 +637,8 @@ watch(storageContext, ([s]) => {
   if (!key) return
   let record = savedDrafts.get(key)
   if (!record) {
-    record = {key, has: draft.has, color: draft.color, size: draft.size, edited: new Set(),
-      loaded: false, reading: null, writing: null, timer: undefined, version: 0,
-      savedVersion: 0, failedWrite: false, legacy: null}
+    record = {key, has: draft.has, color: draft.color, size: draft.size, edits: null,
+      editedSinceFrame: false, loaded: false, reading: null, writing: null, timer: undefined, legacy: null}
     savedDrafts.set(key, record)
   } else if (record.has !== draft.has) {
     for (let i = 0; i < Math.min(record.has.length, draft.has.length); i++) {

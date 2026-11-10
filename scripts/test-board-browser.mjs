@@ -173,11 +173,11 @@ async function badge(page, count) {
   active.phase = 'actual draft pixels ' + count
   await page.waitForFunction(n => Number(document.querySelector('.rail-badge')?.textContent.trim() ?? 0) === n, {timeout: 20_000}, count)
 }
-async function drawPixel(page) {
-  await page.keyboard.press('b')
+async function drawPixel(page, dx = 0, tool = 'b') {
+  await page.keyboard.press(tool)
   const canvas = await page.$('[data-testid="board"]'), box = await canvas.boundingBox()
   assert.ok(box && box.width > 100 && box.height > 100)
-  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
+  await page.mouse.click(box.x + box.width / 2 + dx, box.y + box.height / 2)
 }
 async function canvasColour(page) {
   return page.$eval('[data-testid="board"]', canvas => Array.from(canvas.getContext('2d').getImageData(4, 4, 1, 1).data).slice(0, 3))
@@ -555,7 +555,7 @@ async function failureDetail(error, state, page) {
 try {
   browser = await puppeteer.launch({executablePath, headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--no-first-run']})
   const browserVersion = await browser.version()
-  for (const name of ['old-head', 'old-totals', 'late-router', 'unavailable', 'old-chunk', 'old-history', 'old-log-error', 'canvas-switch', 'draft-context', 'draft-fast-return', 'draft-storage-reload', 'legacy-storage-migration', 'late-history-details', 'late-router-details', 'live-details', 'history-unavailable-details', 'unavailable-details', 'pointer-cancel', 'held-pointer-context', 'pinch-spray', 'deferred-route', 'view-dimensions', 'image-stamp', 'image-close', 'image-replace-guide', 'image-close-pending', 'image-drop', 'image-queued-close', 'image-native-escape', 'node-modal-queued-close', 'image-alpha-count', 'image-stamp-overlap', 'image-tall-preview', 'image-paste-svg', 'image-source-budget', 'image-transfer-budget', 'modal-focus-keyboard']) {
+  for (const name of ['old-head', 'old-totals', 'late-router', 'unavailable', 'old-chunk', 'old-history', 'old-log-error', 'canvas-switch', 'draft-context', 'draft-fast-return', 'draft-storage-reload', 'legacy-storage-migration', 'draft-concurrent-recovery', 'late-history-details', 'late-router-details', 'live-details', 'history-unavailable-details', 'unavailable-details', 'pointer-cancel', 'held-pointer-context', 'pinch-spray', 'deferred-route', 'view-dimensions', 'image-stamp', 'image-close', 'image-replace-guide', 'image-close-pending', 'image-drop', 'image-queued-close', 'image-native-escape', 'node-modal-queued-close', 'image-alpha-count', 'image-stamp-overlap', 'image-tall-preview', 'image-paste-svg', 'image-source-budget', 'image-transfer-budget', 'modal-focus-keyboard']) {
     active = {name, held: new Map(), calls: [], contractCalls: []}; const state = active
     console.log('MOZAIC-BOARD-BROWSER-START ' + JSON.stringify({case: name, source}))
     const context = await browser.createBrowserContext(), page = await context.newPage()
@@ -563,14 +563,17 @@ try {
     const caseStart = results.length, errorStart = errors.length, unexpectedStart = unexpected.length
     state.phase = 'setup'
     try {
-    page.setDefaultTimeout(20_000); await page.setViewport({width: 1440, height: 1000})
-    page.on('pageerror', error => errors.push(String(error)))
-    await page.setRequestInterception(true)
-    page.on('request', request => {
-      const url = request.url()
-      if (url.startsWith(origin + '/') || url.startsWith('data:') || url.startsWith('blob:')) void request.continue()
-      else {unexpected.push(new URL(url).origin); void request.abort('blockedbyclient')}
-    })
+    const preparePage = async page => {
+      page.setDefaultTimeout(20_000); await page.setViewport({width: 1440, height: 1000})
+      page.on('pageerror', error => errors.push(String(error)))
+      await page.setRequestInterception(true)
+      page.on('request', request => {
+        const url = request.url()
+        if (url.startsWith(origin + '/') || url.startsWith('data:') || url.startsWith('blob:')) void request.continue()
+        else {unexpected.push(new URL(url).origin); void request.abort('blockedbyclient')}
+      })
+    }
+    await preparePage(page)
     if (['draft-context', 'draft-fast-return', 'draft-storage-reload', 'legacy-storage-migration'].includes(name)) {
       const seeds = {[draftKey(13370)]: name === 'draft-context' || name === 'draft-fast-return' ? draftBytes(1, 0xff0000) : [],
         [draftKey(13371)]: name === 'draft-context' ? draftBytes(2, 0x00ff00) : []}
@@ -578,8 +581,10 @@ try {
       if (name === 'draft-context') await keeper.lock()
       if (name === 'legacy-storage-migration') {legacyValue = Buffer.from(draftBytes(1, 0xff0000)).toString('hex'); await keeper.legacy(draftKey(13370), legacyValue); await keeper.lock('readonly')}
     }
+    if (name === 'draft-concurrent-recovery') keeper = await storageKeeper(context, {[draftKey(13370)]: draftBytes(1, 0xff0000)})
     if (name === 'image-stamp-overlap') keeper = await storageKeeper(context)
     const query = new URLSearchParams({rpc: origin + '/node/a/rpc', contract: A, x: (DETAIL_CASES.includes(name) || GESTURE_CASES.includes(name) || IMAGE_CASES.includes(name) || MODAL_CASES.includes(name)) ? '500' : '0', y: (DETAIL_CASES.includes(name) || GESTURE_CASES.includes(name) || IMAGE_CASES.includes(name) || MODAL_CASES.includes(name)) ? '500' : '0', z: '8', ...(['late-router', 'late-router-details'].includes(name) ? {router: R} : {})})
+    if (name === 'draft-concurrent-recovery') {query.set('x', '500'); query.set('y', '500')}
     if (name === 'image-stamp-overlap') query.set('x', '999')
     // Opening the keeper tab can background the product. Its real visibility
     // and animation-frame polling must match the foreground UI under test.
@@ -685,6 +690,55 @@ try {
       const stored = await keeper.read(draftKey(13370)); assert.equal(stored.length, 6); await badge(page, 1)
       results.push({case: name, actualNativeIndexedDBReadonlyLock: true, legacyRetainedWhileWriteBlocked: true,
         legacyRemovedOnlyAfterActualCommit: true, actualCommittedDraftBytes: stored.length, pass: true})
+    } else if (name === 'draft-concurrent-recovery') {
+      const key = draftKey(13370), seed = draftBytes(1, 0xff0000)
+      await waitStats(page, 5, 6); await badge(page, 1)
+      const second = await context.newPage()
+      await preparePage(second); await second.bringToFront()
+      await second.goto(page.url(), {waitUntil: 'domcontentloaded'})
+      await waitStats(second, 5, 6); await badge(second, 1)
+      await page.bringToFront()
+
+      // Both actual views have already loaded the same single stored pixel.
+      await drawPixel(page, -32); await badge(page, 2)
+      await untilAsync(async () => (await keeper.read(key)).length === 12, 'The first tab must commit its own edit')
+      const first = await keeper.read(key)
+      assert.deepEqual(first.slice(0, 6), seed)
+      await second.bringToFront(); await drawPixel(second, 32); await badge(second, 2)
+      await untilAsync(async () => (await keeper.read(key)).length === 18, 'The stale second tab must retain the first edit')
+      const merged = await keeper.read(key)
+      assert.deepEqual(merged.slice(0, 12), first)
+
+      await page.bringToFront(); await drawPixel(page, -32, 'e'); await badge(page, 1)
+      await untilAsync(async () => (await keeper.read(key)).length === 12, 'Erasing must remove only the selected pixel')
+      const committed = [...seed, ...merged.slice(12)]
+      assert.deepEqual(await keeper.read(key), committed)
+
+      // A native readonly transaction lets other readers through until a writer queues.
+      // Close the writing page while it is waiting, then check the whole prior record.
+      await second.bringToFront()
+      state.phase = 'hold storage and close the writing tab'
+      assert.ok((await keeper.lock('readonly')).actualNativeTransactionActive)
+      assert.deepEqual(await keeper.read(key), committed)
+      await drawPixel(second, 64); await badge(second, 3)
+      await later(1300)
+      let settled = false
+      const waiting = keeper.read(key).then(value => {settled = true; return value})
+      await later(120)
+      assert.equal(settled, false, 'The new readonly request must be waiting behind the blocked product writer')
+      await second.close({runBeforeUnload: false})
+      assert.ok(second.isClosed())
+      const released = await keeper.release()
+      assert.ok(released.completed && !released.timedOut && released.requests > 0)
+      assert.deepEqual(await waiting, committed)
+
+      await page.bringToFront(); await page.reload({waitUntil: 'domcontentloaded'})
+      await waitStats(page, 5, 6); await badge(page, 2)
+      assert.deepEqual(await keeper.read(key), committed)
+      results.push({case: name, twoActualProductTabsOnSameOrigin: true, actualInitialSharedPixels: 1,
+        actualMergedDraftBytes: merged, actualCommittedDraftBytes: committed,
+        actualErasedPixelStayedAbsent: true, actualNativeWriterBlockedBeforeTabClose: true,
+        actualTabClosedBeforeUnlock: true, actualPageReload: true, actualRestoredPixels: 2, pass: true})
     } else if (name === 'late-history-details') {
       await until(() => state.held.has('detail-history'), 'The original current history must be held')
       await waitStats(page, 5, 6); await selectDetailPixel(page)
@@ -1412,12 +1466,12 @@ try {
   }
   console.log('MOZAIC-BOARD-BROWSER-AGGREGATE ' + JSON.stringify({source, attempted: results.length + failures.length, passed: results.length, failures}))
   assert.deepEqual(failures, [], 'All independent production scenarios must pass')
-  assert.equal(results.length, 37); assert.deepEqual(errors, []); assert.deepEqual(unexpected, [])
+  assert.equal(results.length, 38); assert.deepEqual(errors, []); assert.deepEqual(unexpected, [])
   assert.ok(delivered.has('index.html') && Array.from(delivered.keys()).some(name => name.endsWith('.js')))
   console.log('MOZAIC-BOARD-BROWSER-SUMMARY ' + JSON.stringify({schema: 1, source, cases: results.length, passed: results.length, failed: 0,
     browserVersion, nodeVersion: process.version, platform: process.platform, architecture: process.arch,
     actualProductPageVisibility: 'visible', independentScenarioFailuresCollectedBeforeFinalVerdict: true,
-    actualProductionEntryRoutes: ['canvas', 'gallery'], actualDraftPixelsPreserved: 1, actualIndexedDBAndLegacyStorage: true, nativeStorageLockCases: 3, actualDraftReloadCases: 1, actualPixelDetailCases: 5, stationaryPointerDetailCases: 2, actualGestureAndNavigationCases: 5, actualTouchInputCases: 3, actualRouteTimerBoundaryCases: 1, actualSmallCanvasCases: 1, actualImageImportCases: 14, actualImageBudgetCases: 1, actualImageTransferBudgetCases: 1, actualBrowserClipboardEventCases: 3, actualNativePictureSizeCases: 1, actualNativeAlphaCountCases: 1, actualNativeStampOverlapCases: 1, actualNativeFileDropCases: 4, actualNativeModalCases: 4, actualModalFocusKeyboardCases: 1, actualQueuedModalCloseCases: 2, actualNativeEscapeCases: 5, actualNativePNGPlacementCases: 3, actualNativeSVGResourceCases: 5, actualExplicitObjectURLLifetimeCases: 6, actualPendingImportCloseCases: 2,
+    actualProductionEntryRoutes: ['canvas', 'gallery'], actualDraftPixelsPreserved: 1, actualIndexedDBAndLegacyStorage: true, nativeStorageLockCases: 4, actualDraftReloadCases: 2, actualSharedDraftRecoveryCases: 1, actualPixelDetailCases: 5, stationaryPointerDetailCases: 2, actualGestureAndNavigationCases: 5, actualTouchInputCases: 3, actualRouteTimerBoundaryCases: 1, actualSmallCanvasCases: 1, actualImageImportCases: 14, actualImageBudgetCases: 1, actualImageTransferBudgetCases: 1, actualBrowserClipboardEventCases: 3, actualNativePictureSizeCases: 1, actualNativeAlphaCountCases: 1, actualNativeStampOverlapCases: 1, actualNativeFileDropCases: 4, actualNativeModalCases: 4, actualModalFocusKeyboardCases: 1, actualQueuedModalCloseCases: 2, actualNativeEscapeCases: 5, actualNativePNGPlacementCases: 3, actualNativeSVGResourceCases: 5, actualExplicitObjectURLLifetimeCases: 6, actualPendingImportCloseCases: 2,
     servedBuildFiles: Object.fromEntries(Array.from(delivered).sort()), unexpectedExternalRequests: 0, pageOrFixtureErrors: 0,
     walletProvidersConnected: 0, publicNetworkOrRealNoMExecution: false, sourceTestHooksOrProductModuleReplacements: 0}))
 } catch (error) {
