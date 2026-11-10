@@ -31,7 +31,9 @@ const routerPaint = {address: R, blockNumber: '0x9', transactionHash: TX, transa
 const DETAIL_CASES = ['late-history-details','late-router-details','live-details','history-unavailable-details','unavailable-details']
 const GESTURE_CASES = ["pointer-cancel", "held-pointer-context", "pinch-spray", "deferred-route", "view-dimensions"]
 const IMAGE_CASES = ['image-stamp', 'image-close', 'image-replace-guide', 'image-close-pending', 'image-drop', 'image-alpha-count', 'image-stamp-overlap', 'image-tall-preview', 'image-paste-svg', 'image-source-budget', 'image-transfer-budget']
-const MODAL_CASES = ['image-queued-close', 'image-native-escape', 'node-modal-queued-close']
+const MODAL_CASES = ['image-queued-close', 'image-native-escape', 'node-modal-queued-close', 'modal-focus-keyboard']
+const NODE_RPC = 'dialog[open] [data-testid="node-rpc"]'
+const NODE_CONTRACT = 'dialog[open] [data-testid="node-contract"]'
 function detailPaint({block = 9, painter = ARTIST, transaction = TX, rgb = 0x112233} = {}) {
   const packed = '0x' + DETAIL_INDEX.toString(16).padStart(6, '0') + rgb.toString(16).padStart(6, '0')
   return {...canvasPaint, blockNumber: hex(block), transactionHash: transaction,
@@ -157,9 +159,9 @@ async function waitStats(page, painted, balance) {
 async function changeNode(page, url) {
   active.phase = 'actual node picker'
   await page.click('[data-testid="node-picker"]')
-  await page.waitForSelector('#rpc-url', {visible: true})
-  await page.$eval('#rpc-url', (input, value) => {input.value = value; input.dispatchEvent(new Event('input', {bubbles: true}))}, url)
-  await page.$eval('#rpc-url', input => input.closest('form').requestSubmit())
+  await page.waitForSelector(NODE_RPC, {visible: true})
+  await page.$eval(NODE_RPC, (input, value) => {input.value = value; input.dispatchEvent(new Event('input', {bubbles: true}))}, url)
+  await page.$eval(NODE_RPC, input => input.closest('form').requestSubmit())
 }
 async function quiet(page) {active.phase = 'network idle after released HTTP replies'; await page.waitForNetworkIdle({idleTime: 250, timeout: 20_000}); await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))}
 
@@ -256,7 +258,7 @@ async function pickText(page, text) {
 }
 async function pauseThroughPicker(page) {
   await page.click('[data-testid="node-picker"]')
-  await page.waitForSelector('#rpc-url', {visible: true})
+  await page.waitForSelector(NODE_RPC, {visible: true})
   const buttons = await page.$$('button')
   let paused
   for (const button of buttons) if (await button.evaluate(node => node.textContent.trim() === 'Paused')) {paused = button; break}
@@ -437,6 +439,24 @@ async function transferFile(page, bytes, name, type = '', total = bytes.length) 
   }, {encoded: bytes.toString('base64'), name, type, total})
 }
 
+async function dialogAccessibleName(page, session, title) {
+  const id = await page.evaluate(title => {
+    const dialog = [...document.querySelectorAll('dialog[open]')].find(el => el.querySelector('h2')?.textContent.trim() === title)
+    const heading = dialog?.querySelector('h2')
+    return heading?.id && dialog.getAttribute('aria-labelledby') === heading.id ? heading.id : null
+  }, title)
+  assert.ok(id, 'The native dialog must reference its own visible heading')
+  const {root} = await session.send('DOM.getDocument')
+  const {nodeId} = await session.send('DOM.querySelector', {
+    nodeId: root.nodeId, selector: 'dialog[open][aria-labelledby=' + JSON.stringify(id) + ']',
+  })
+  assert.ok(nodeId)
+  const {nodes} = await session.send('Accessibility.getPartialAXTree', {nodeId, fetchRelatives: false})
+  const dialog = nodes.find(node => !node.ignored && node.role?.value === 'dialog')
+  assert.equal(dialog?.name?.value, title)
+  return dialog.name.value
+}
+
 async function boardTransfer(page, route, file, {mixed = false, closeNow = false} = {}) {
   return page.evaluate(async (route, file, mixed, closeNow) => {
     const canvas = document.querySelector('[data-testid="board"]')
@@ -535,7 +555,7 @@ async function failureDetail(error, state, page) {
 try {
   browser = await puppeteer.launch({executablePath, headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--no-first-run']})
   const browserVersion = await browser.version()
-  for (const name of ['old-head', 'old-totals', 'late-router', 'unavailable', 'old-chunk', 'old-history', 'old-log-error', 'canvas-switch', 'draft-context', 'draft-fast-return', 'draft-storage-reload', 'legacy-storage-migration', 'late-history-details', 'late-router-details', 'live-details', 'history-unavailable-details', 'unavailable-details', 'pointer-cancel', 'held-pointer-context', 'pinch-spray', 'deferred-route', 'view-dimensions', 'image-stamp', 'image-close', 'image-replace-guide', 'image-close-pending', 'image-drop', 'image-queued-close', 'image-native-escape', 'node-modal-queued-close', 'image-alpha-count', 'image-stamp-overlap', 'image-tall-preview', 'image-paste-svg', 'image-source-budget', 'image-transfer-budget']) {
+  for (const name of ['old-head', 'old-totals', 'late-router', 'unavailable', 'old-chunk', 'old-history', 'old-log-error', 'canvas-switch', 'draft-context', 'draft-fast-return', 'draft-storage-reload', 'legacy-storage-migration', 'late-history-details', 'late-router-details', 'live-details', 'history-unavailable-details', 'unavailable-details', 'pointer-cancel', 'held-pointer-context', 'pinch-spray', 'deferred-route', 'view-dimensions', 'image-stamp', 'image-close', 'image-replace-guide', 'image-close-pending', 'image-drop', 'image-queued-close', 'image-native-escape', 'node-modal-queued-close', 'image-alpha-count', 'image-stamp-overlap', 'image-tall-preview', 'image-paste-svg', 'image-source-budget', 'image-transfer-budget', 'modal-focus-keyboard']) {
     active = {name, held: new Map(), calls: [], contractCalls: []}; const state = active
     console.log('MOZAIC-BOARD-BROWSER-START ' + JSON.stringify({case: name, source}))
     const context = await browser.createBrowserContext(), page = await context.newPage()
@@ -601,8 +621,8 @@ try {
     } else if (name === 'old-chunk' || name === 'canvas-switch') {
       await until(() => state.held.has('chunk'), 'The original A chunk must actually be held')
       if (name === 'canvas-switch') {
-        await page.click('[data-testid="node-picker"]'); await page.waitForSelector('#contract', {visible: true})
-        await page.$eval('#contract', (input, value) => {input.value = value; input.dispatchEvent(new Event('input', {bubbles: true})); input.closest('form').requestSubmit()}, B)
+        await page.click('[data-testid="node-picker"]'); await page.waitForSelector(NODE_CONTRACT, {visible: true})
+        await page.$eval(NODE_CONTRACT, (input, value) => {input.value = value; input.dispatchEvent(new Event('input', {bubbles: true})); input.closest('form').requestSubmit()}, B)
       } else await changeNode(page, origin + '/node/b/rpc')
       await waitStats(page, 7, 8)
       // The obsolete HTTP reply is intentionally pending. Observe the current
@@ -896,19 +916,20 @@ try {
     } else if (name === 'node-modal-queued-close') {
       state.phase = 'another actual modal consumer retains its new opening across an old native close event'
       await waitStats(page,5,6);await quiet(page);await badge(page,0)
-      await page.click('[data-testid="node-picker"]');await page.waitForSelector('#rpc-url',{visible:true})
-      const before=await page.$eval('#rpc-url',input=>input.value)
+      await page.click('[data-testid="node-picker"]');await page.waitForSelector(NODE_RPC,{visible:true})
+      const before=await page.$eval(NODE_RPC,input=>input.value)
       const transition=await reopenBeforeNativeClose(page,'node')
       assert.equal(transition.closedBeforeReopen,true);assert.equal(transition.reopenedBeforeEvent,true)
       assert.equal(transition.nativeEvent.trusted,true);assert.equal(transition.nativeEvent.targetMatches,true)
       assert.equal(transition.nativeEvent.openAtEvent,true);assert.equal(transition.openAfterEvent,true);assert.equal(transition.sameElement,true)
-      await page.waitForSelector('#rpc-url',{visible:true});assert.equal(await page.$eval('#rpc-url',input=>input.value),before)
+      await page.waitForSelector(NODE_RPC,{visible:true});assert.equal(await page.$eval(NODE_RPC,input=>input.value),before)
+      assert.equal(await page.$eval(NODE_RPC,input=>document.activeElement===input),true)
       await page.keyboard.press('Escape');await page.waitForFunction(()=>!document.querySelector('dialog[open]'))
       await waitStats(page,5,6);await badge(page,0)
       results.push({case:name,actualNodePickerModalConsumer:true,actualProductDOMCloseAndNodePickerReopen:true,
         actualSameNativeElementReopenedBeforeQueuedClose:true,actualTrustedQueuedCloseObserved:true,
         actualCurrentNativeEscapeStillCloses:true,actualNodeInputAndCurrentBoardPreserved:true,
-        actualNativeDialogAndProductAPIsUnmodified:true,actualDraftPixels:0,transition,pass:true})
+        actualNativeDialogAndProductAPIsUnmodified:true,actualDraftPixels:0,actualReopenedNodeFocusAtEndpoint:true,transition,pass:true})
 
     } else if (name === 'image-alpha-count') {
       state.phase = 'actual PNG alpha bytes and preview-only scalar count'
@@ -1254,6 +1275,103 @@ try {
         await session.send('Page.setInterceptFileChooserDialog', {enabled: false})
         await Promise.all(handles.map(handle => handle.dispose()))
       }
+    } else if (name === 'modal-focus-keyboard') {
+      state.phase = 'shared dialog names and independent desktop and mobile labels'
+      await waitStats(page, 5, 6); await quiet(page); await badge(page, 0)
+      const session = await page.createCDPSession()
+      await session.send('DOM.enable')
+      await session.send('Accessibility.enable')
+      const associations = await page.evaluate(() => {
+        const dialogs = [...document.querySelectorAll('dialog.mozaic-dialog')]
+        const names = dialogs.map(dialog => {
+          const heading = dialog.querySelector('h2')
+          if (!heading?.id || dialog.getAttribute('aria-labelledby') !== heading.id) throw new Error('Missing dialog title association')
+          return heading.textContent.trim()
+        }).sort()
+        const fields = [...document.querySelectorAll('[data-testid="node-rpc"], [data-testid="node-contract"]')]
+        const labels = fields.map(input => {
+          const label = input.labels?.item(0)
+          if (!input.id || label?.control !== input || label.closest('dialog') !== input.closest('dialog')) {
+            throw new Error('A node field does not own its label')
+          }
+          return label.textContent.trim()
+        }).sort()
+        const ids = [...dialogs.map(dialog => dialog.querySelector('h2').id), ...fields.map(input => input.id)]
+        return {names, labels, distinctIds: new Set(ids).size, totalIds: ids.length}
+      })
+      assert.deepEqual(associations.names, ['Account', 'Bring in an image', 'Connect a wallet', 'Keyboard', 'Node and canvas', 'Node and canvas'])
+      assert.deepEqual(associations.labels, ['JSON-RPC endpoint', 'JSON-RPC endpoint', 'Mozaic contract', 'Mozaic contract'])
+      assert.equal(associations.distinctIds, associations.totalIds); assert.equal(associations.totalIds, 10)
+
+      state.phase = 'node keyboard entry and forward and backward focus'
+      const node = '[data-testid="node-picker"]'
+      const help = 'button[title="Keyboard shortcuts (?)"]'
+      const focused = () => page.evaluate(() => {
+        const el = document.activeElement
+        return el?.getAttribute('data-testid') || el?.getAttribute('title') || ''
+      })
+      const waitFocus = selector => page.waitForFunction(selector => document.activeElement?.matches(selector), {}, selector)
+      const axNames = []
+      await page.focus(node); await page.keyboard.press('Enter')
+      await waitFocus(NODE_RPC)
+      const nodeInitialFocus = await focused()
+      axNames.push(await dialogAccessibleName(page, session, 'Node and canvas'))
+      await page.keyboard.press('Shift+Tab')
+      const nodeBack = await focused()
+      await page.keyboard.press('Tab')
+      const nodeForward = await focused()
+      assert.deepEqual([nodeInitialFocus, nodeBack, nodeForward], ['node-rpc', 'Close', 'node-rpc'])
+      await page.keyboard.press('Escape')
+      await waitFocus(node)
+      await page.waitForFunction(() => !document.querySelector('dialog[open]'))
+
+      state.phase = 'keyboard help beneath a pasted image dialog'
+      await page.focus(help); await page.keyboard.press('Enter')
+      await waitFocus('dialog[open] button[title="Close"]')
+      axNames.push(await dialogAccessibleName(page, session, 'Keyboard'))
+      const paste = await page.evaluate(() => {
+        const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="4" height="2"><rect width="4" height="2" fill="red"/></svg>'
+        const file = new File([svg], 'focus-stack.svg', {type: 'image/svg+xml'})
+        const data = new DataTransfer()
+        data.items.add(file)
+        const event = new ClipboardEvent('paste', {bubbles: true, cancelable: true, clipboardData: data})
+        document.activeElement.dispatchEvent(event)
+        return {prevented: event.defaultPrevented, bytes: file.size}
+      })
+      assert.equal(paste.prevented, true)
+      await page.waitForFunction(() => document.querySelectorAll('dialog[open]').length === 2 &&
+        [...document.querySelectorAll('dialog[open] p')].some(node => node.textContent.trim().startsWith('8 pixels.')))
+      axNames.push(await dialogAccessibleName(page, session, 'Bring in an image'))
+      const imageFocus = () => page.evaluate(() => document.activeElement?.closest('dialog')?.querySelector('h2')?.textContent.trim())
+      assert.equal(await imageFocus(), 'Bring in an image')
+      const imageInitial = await focused()
+      await page.keyboard.press('Tab')
+      const imageForward = await focused()
+      await page.keyboard.press('Shift+Tab')
+      const imageBack = await focused()
+      assert.deepEqual([imageInitial, imageForward, imageBack], ['Close', 'image-width', 'Close'])
+      const inert = await page.evaluate(help => {
+        const active = document.activeElement
+        const lower = [...document.querySelectorAll('dialog[open]')].find(el => el.querySelector('h2')?.textContent.trim() === 'Keyboard')
+        lower.querySelector('button[title="Close"]').focus()
+        const lowerInert = document.activeElement === active
+        document.querySelector(help).focus()
+        return {lowerInert, pageInert: document.activeElement === active}
+      }, help)
+      assert.deepEqual(inert, {lowerInert: true, pageInert: true})
+      await page.keyboard.press('Escape')
+      await page.waitForFunction(() => document.querySelectorAll('dialog[open]').length === 1 &&
+        document.activeElement?.getAttribute('title') === 'Close' &&
+        document.activeElement?.closest('dialog')?.querySelector('h2')?.textContent.trim() === 'Keyboard')
+      await page.keyboard.press('Escape')
+      await waitFocus(help)
+      await page.waitForFunction(() => !document.querySelector('dialog[open]'))
+      await quiet(page); await badge(page, 0)
+      results.push({case: name, associations, actualChromiumAccessibleNames: axNames,
+        actualNodeFocusSequence: [nodeInitialFocus, nodeBack, nodeForward], actualNodeFocusRestored: true,
+        actualImageFocusSequence: [imageInitial, imageForward, imageBack], actualModalInertness: inert,
+        actualTopEscapeRestoredLowerFocus: true, actualLowerEscapeRestoredInvoker: true,
+        controlledClipboardFixture: paste, actualNestedPreviewPixels: 8, actualDraftPixels: 0, pass: true})
     } else {
       await waitStats(page, 5, 6); await quiet(page); await changeNode(page, '')
       await page.waitForFunction(() => {const rows = Array.from(document.querySelectorAll('.stats-body b'), node => node.textContent.trim()); return rows[0] === '-' && rows[2] === '-'})
@@ -1278,12 +1396,12 @@ try {
   }
   console.log('MOZAIC-BOARD-BROWSER-AGGREGATE ' + JSON.stringify({source, attempted: results.length + failures.length, passed: results.length, failures}))
   assert.deepEqual(failures, [], 'All independent production scenarios must pass')
-  assert.equal(results.length, 36); assert.deepEqual(errors, []); assert.deepEqual(unexpected, [])
+  assert.equal(results.length, 37); assert.deepEqual(errors, []); assert.deepEqual(unexpected, [])
   assert.ok(delivered.has('index.html') && Array.from(delivered.keys()).some(name => name.endsWith('.js')))
-  console.log('MOZAIC-BOARD-BROWSER-SUMMARY ' + JSON.stringify({schema: 1, source, cases: 36, passed: 36, failed: 0,
+  console.log('MOZAIC-BOARD-BROWSER-SUMMARY ' + JSON.stringify({schema: 1, source, cases: results.length, passed: results.length, failed: 0,
     browserVersion, nodeVersion: process.version, platform: process.platform, architecture: process.arch,
     actualProductPageVisibility: 'visible', independentScenarioFailuresCollectedBeforeFinalVerdict: true,
-    actualProductionEntryRoutes: ['canvas', 'gallery'], actualDraftPixelsPreserved: 1, actualIndexedDBAndLegacyStorage: true, nativeStorageLockCases: 3, actualDraftReloadCases: 1, actualPixelDetailCases: 5, stationaryPointerDetailCases: 2, actualGestureAndNavigationCases: 5, actualTouchInputCases: 3, actualRouteTimerBoundaryCases: 1, actualSmallCanvasCases: 1, actualImageImportCases: 13, actualImageBudgetCases: 1, actualImageTransferBudgetCases: 1, actualBrowserClipboardEventCases: 2, actualNativePictureSizeCases: 1, actualNativeAlphaCountCases: 1, actualNativeStampOverlapCases: 1, actualNativeFileDropCases: 4, actualNativeModalCases: 3, actualQueuedModalCloseCases: 2, actualNativeEscapeCases: 2, actualNativePNGPlacementCases: 3, actualNativeSVGResourceCases: 5, actualExplicitObjectURLLifetimeCases: 6, actualPendingImportCloseCases: 2,
+    actualProductionEntryRoutes: ['canvas', 'gallery'], actualDraftPixelsPreserved: 1, actualIndexedDBAndLegacyStorage: true, nativeStorageLockCases: 3, actualDraftReloadCases: 1, actualPixelDetailCases: 5, stationaryPointerDetailCases: 2, actualGestureAndNavigationCases: 5, actualTouchInputCases: 3, actualRouteTimerBoundaryCases: 1, actualSmallCanvasCases: 1, actualImageImportCases: 14, actualImageBudgetCases: 1, actualImageTransferBudgetCases: 1, actualBrowserClipboardEventCases: 3, actualNativePictureSizeCases: 1, actualNativeAlphaCountCases: 1, actualNativeStampOverlapCases: 1, actualNativeFileDropCases: 4, actualNativeModalCases: 4, actualModalFocusKeyboardCases: 1, actualQueuedModalCloseCases: 2, actualNativeEscapeCases: 5, actualNativePNGPlacementCases: 3, actualNativeSVGResourceCases: 5, actualExplicitObjectURLLifetimeCases: 6, actualPendingImportCloseCases: 2,
     servedBuildFiles: Object.fromEntries(Array.from(delivered).sort()), unexpectedExternalRequests: 0, pageOrFixtureErrors: 0,
     walletProvidersConnected: 0, publicNetworkOrRealNoMExecution: false, sourceTestHooksOrProductModuleReplacements: 0}))
 } catch (error) {

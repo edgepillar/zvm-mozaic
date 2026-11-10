@@ -2,18 +2,18 @@
 // A dialog, using the platform's own. <dialog> brings the focus trap, the
 // backdrop, Escape to close and inert content behind it, none of which are
 // worth reimplementing.
-import {onBeforeUnmount, ref, watch} from 'vue'
+import {onBeforeUnmount, ref, useId, watch} from 'vue'
 import Icon from './Icon.vue'
 
 const props = defineProps<{open: boolean; title: string; width?: number}>()
 const emit = defineEmits<{(e: 'close'): void}>()
 
 const el = ref<HTMLDialogElement | null>(null)
+const titleId = useId()
 
 watch(
-  () => props.open,
-  (open) => {
-    const dialog = el.value
+  [() => props.open, el],
+  ([open, dialog]) => {
     if (!dialog) return
     if (open && !dialog.open) dialog.showModal()
     if (!open && dialog.open) dialog.close()
@@ -35,12 +35,13 @@ onBeforeUnmount(() => el.value?.open && el.value.close())
   <dialog
     ref="el"
     class="mozaic-dialog"
+    :aria-labelledby="titleId"
     :style="{width: `${width ?? 420}px`}"
     @close="nativeClosed"
     @click.self="emit('close')"
   >
     <div class="flex items-center justify-between gap-3 px-4 py-3 border-b border-line">
-      <h2 class="text-[15px] font-semibold tracking-[-0.01em]">{{ title }}</h2>
+      <h2 :id="titleId" class="text-[15px] font-semibold tracking-[-0.01em]">{{ title }}</h2>
       <button class="btn btn-sm btn-quiet px-1.5" title="Close" @click="emit('close')">
         <Icon name="x" :size="15" />
         <span class="sr-only">Close</span>

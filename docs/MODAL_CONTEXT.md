@@ -37,9 +37,27 @@ complete job logs must bind all 192 memory controls, 30 native Chrome cases,
 production build to the exact source. Source, browser/platform and delivered
 production-file digests remain part of the result.
 
-The shared modal also has wallet/account and keyboard-help consumers. Their real
-provider/focus/accessibility paths, initially-open mounts, broader event sequences,
-formats/sizes, other supported browsers/platforms, concurrent tabs/crash recovery,
+## Dialog names and keyboard focus
+
+Each native dialog names itself from its own visible heading. The node picker
+uses distinct IDs in the desktop and mobile copies for the RPC and contract
+labels. Its RPC field receives native initial focus. The dialog watcher reads
+the current open request when the element attaches. Two memory controls
+exercise initially-open and delayed attachment.
+
+The Chrome case checks the actual accessibility-tree names of the node,
+keyboard and image dialogs. It uses Tab and Shift+Tab, opens an image by
+dispatching controlled paste data into the keyboard dialog, and checks that
+the underlying dialog and page cannot take focus. Escape restores focus to
+the lower dialog, then to its invoker. The queued node reopen also restores
+focus to the RPC field. Wallet and account heading associations are inspected
+in the mounted DOM.
+
+Current-source hosted CI checks 235 module/script controls, 37 Chrome
+scenarios and 35 original isolated contract events, with fresh compiler,
+ABI drift, TypeScript and production build checks. Real provider and
+assistive-technology interaction, broader event sequences, formats/sizes,
+other supported browsers/platforms, concurrent tabs/crash recovery,
 real NoM/finality/economics and maintainer/operator/release acceptance remain open.
 All original roadmap acceptance requirements and the production NO_GO boundary
 remain. Earlier source/CI evidence and failures are retained.

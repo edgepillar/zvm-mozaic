@@ -2,7 +2,7 @@
 // Which node, which canvas, and how often to look. A first-class control
 // rather than a buried setting: on a devnet the node is what changes most, and
 // pointing the page at your own node or your own canvas is the normal case.
-import {computed, ref, watch} from 'vue'
+import {computed, ref, useId, watch} from 'vue'
 import {endpoint, setEndpoint, setContract, check, PRESETS, isLoopback, mixedContentBlocked, normalize, ready, deploymentFor} from '../core/endpoint'
 import {chain, refreshNow} from '../core/chain'
 import {chainName} from '../core/chains'
@@ -12,6 +12,8 @@ import Icon from './Icon.vue'
 import Modal from './Modal.vue'
 
 const open = ref(false)
+const rpcId = useId()
+const contractId = useId()
 const draft = ref(endpoint.rpc)
 const contractDraft = ref(endpoint.contract ?? '')
 const busy = ref(false)
@@ -86,9 +88,9 @@ const source = {link: 'from the link', saved: 'chosen here', build: 'built into 
     <Modal :open="open" title="Node and canvas" :width="480" @close="open = false">
       <div class="p-4 grid gap-4 max-h-[80vh] overflow-auto">
         <form class="grid gap-2" @submit.prevent="use(draft)">
-          <label class="ledger" for="rpc-url">JSON-RPC endpoint</label>
+          <label class="ledger" :for="rpcId">JSON-RPC endpoint</label>
           <div class="flex gap-2">
-            <input id="rpc-url" v-model="draft" class="input" spellcheck="false" autocomplete="off" placeholder="https://host/rpc" />
+            <input :id="rpcId" data-testid="node-rpc" autofocus v-model="draft" class="input" spellcheck="false" autocomplete="off" placeholder="https://host/rpc" />
             <button class="btn btn-plasma" type="submit" :disabled="busy || !dirty">Use</button>
           </div>
         </form>
@@ -118,9 +120,9 @@ const source = {link: 'from the link', saved: 'chosen here', build: 'built into 
         </div>
 
         <form v-if="endpoint.chainId !== null" class="grid gap-2 border-t border-line pt-3" @submit.prevent="useContract(contractDraft)">
-          <label class="ledger" for="contract">Mozaic contract</label>
+          <label class="ledger" :for="contractId">Mozaic contract</label>
           <div class="flex gap-2">
-            <input id="contract" v-model="contractDraft" class="input" spellcheck="false" autocomplete="off" placeholder="0x..." />
+            <input :id="contractId" data-testid="node-contract" v-model="contractDraft" class="input" spellcheck="false" autocomplete="off" placeholder="0x..." />
             <button class="btn" type="submit" :disabled="busy || contractDraft === (endpoint.contract ?? '')">Use</button>
           </div>
           <p class="text-[12px] text-dim">
