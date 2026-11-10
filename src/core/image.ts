@@ -134,8 +134,11 @@ export async function decode(file: File | Blob, signal?: AbortSignal): Promise<D
     let width = img.naturalWidth
     let height = img.naturalHeight
     if (svg) {
-      const size = svgSize(await imageRead(blob.text(), signal))
-      if (!width || !height) [width, height] = size ?? [512, 512]
+      if (!width || !height) {
+        const size = svgSize(await imageRead(blob.text(), signal))
+        width = size?.[0] ?? 512
+        height = size?.[1] ?? 512
+      }
       const k = Math.max(1, 256 / Math.max(width, height))
       width = Math.round(width * k)
       height = Math.round(height * k)

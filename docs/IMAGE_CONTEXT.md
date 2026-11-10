@@ -77,6 +77,18 @@ The tall SVG witness uses a 4-by-4000 input, a 1-by-1000 picture and a
 1-by-240 preview. The dimensions bound the scaled canvas and its pixel
 readback. Source image decoding still uses the browser's existing path.
 
+## SVG size lookup
+
+When the browser provides both natural dimensions, the SVG decoder uses
+them directly. A source text read for size lookup happens only when a natural
+dimension is missing. MIME normalization, viewBox and default-size fallback,
+cancellation, and object URL ownership use the existing paths.
+
+Memory controls count the application text calls. Chrome also dispatches a
+constructed ClipboardEvent with a controlled SVG and other items through the
+actual paste handler. It checks the preview, file chooser and URL disposal.
+The event carries its own test data and leaves the system clipboard untouched.
+
 ## Evidence boundaries
 
 The memory controls execute the actual ImportDialog SFC script with an explicit
@@ -108,8 +120,8 @@ dialog in one page task through
 Every independent scenario is attempted before the verdict, with source,
 browser/platform and delivered production-file digests retained.
 
-Current-source hosted CI is still required for 200 module/script controls,
-32 native Chrome scenarios, all 35 original isolated contract events, fresh
+Current-source hosted CI checks 206 module/script controls,
+34 Chrome scenarios against the production bundle, all 35 original isolated contract events, fresh
 contract/ABI drift checks, TypeScript and production build. Wider format/size,
 browser/platform, concurrent modal/tab/crash, real wallet/provider/NoM and
 maintainer/operator/release requirements remain open. All original roadmap

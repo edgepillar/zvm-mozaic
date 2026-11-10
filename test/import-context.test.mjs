@@ -145,4 +145,64 @@ if(process.env.MOZAIC_IMPORT_BATCH_ORIGINAL==='1') {
     assert.deepEqual(draws, [[1, 1000, 0, 0, 1, 240]])
     f.unmount()
   })
+  test('image typed SVG skips text when the decoder provides both dimensions', async () => {
+    const f = await imageFixture(), file = svg('image/svg+xml')
+    let reads = 0
+    const text = file.text.bind(file)
+    file.text = () => { reads++; return text() }
+    const pending = f.module.decode(file)
+    await f.flush(); f.ready(undefined, 8, 4)
+    const value = await pending
+    assert.deepEqual([reads, value.width, value.height, value.vector], [0, 256, 128, true])
+    assert.equal(value.source, f.images[0]); assert.equal(f.urls.size, 1)
+    f.module.disposeDecoded(value)
+    assert.equal(f.urls.size, 0)
+  })
+  test('image MIME normalization does not read the normalized SVG again', async () => {
+    let inputReads = 0, normalizedReads = 0
+    class ObservedBlob extends Blob {
+      text() { normalizedReads++; return super.text() }
+    }
+    const f = await imageFixture({BlobPort: ObservedBlob}), file = svg('')
+    const text = file.text.bind(file)
+    file.text = () => { inputReads++; return text() }
+    const pending = f.module.decode(file)
+    await f.flush(); f.ready(undefined, 8, 4)
+    const value = await pending
+    assert.deepEqual([inputReads, normalizedReads, value.width, value.height], [1, 0, 256, 128])
+    assert.equal(Array.from(f.urls.values())[0].type, 'image/svg+xml')
+    f.module.disposeDecoded(value)
+    assert.equal(f.urls.size, 0)
+  })
+  test('image SVG fallback reads viewBox and default dimensions only when needed', async () => {
+    for (const [text, size, natural] of [
+      ['<svg viewBox="0 0 8 4"/>', [256, 128], [8, 0]],
+      ['<svg width="4" height="8" viewBox="0 0 8 4"/>', [128, 256], [0, 4]],
+      ['<svg/>', [512, 512], [0, 0]],
+    ]) {
+      const f = await imageFixture()
+      let reads = 0
+      const file = {name: 'fallback.svg', type: 'image/svg+xml', async text() { reads++; return text }}
+      const pending = f.module.decode(file)
+      await f.flush(); f.ready(undefined, ...natural)
+      const value = await pending
+      assert.equal(reads, 1); assert.deepEqual([value.width, value.height], size)
+      assert.equal(f.urls.size, 1)
+      f.module.disposeDecoded(value)
+      assert.equal(f.urls.size, 0)
+    }
+  })
+  test('image abort during the SVG size fallback releases its source URL', async () => {
+    const f = await imageFixture(), abort = new AbortController()
+    let complete
+    const file = {name: 'pending.svg', type: 'image/svg+xml', text: () => new Promise(resolve => { complete = resolve })}
+    const pending = f.module.decode(file, abort.signal)
+    const rejected = assert.rejects(pending, {name: 'AbortError'})
+    await f.flush(); f.ready(undefined, 0, 0); await f.flush()
+    assert.equal(typeof complete, 'function'); assert.equal(f.urls.size, 1)
+    abort.abort(); await rejected
+    assert.equal(f.urls.size, 0); assert.equal(f.revoked.length, 1)
+    complete('<svg viewBox="0 0 8 4"/>'); await f.flush()
+    assert.equal(f.urls.size, 0); assert.equal(f.revoked.length, 1)
+  })
 }

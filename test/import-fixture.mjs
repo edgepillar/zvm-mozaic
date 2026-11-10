@@ -119,14 +119,14 @@ export function __preview(value){previewEl.value=value}
     unmount(){v.unmount()}}
 }
 
-export async function imageFixture() {
+export async function imageFixture({BlobPort = Blob} = {}) {
   const v=vuePorts(), urls=new Map(), revoked=[], images=[], bitmaps=[], timers=[]
   let next=0
   class ImagePort {
     constructor(){this.naturalWidth=8;this.naturalHeight=4;this.src='';images.push(this)}
     decode(){this.pending=deferred();return this.pending.promise}
   }
-  const globals={Image:ImagePort,Blob,File,URL:{
+  const globals={Image:ImagePort,Blob:BlobPort,File,URL:{
     createObjectURL(blob){const url='blob:memory-'+(++next);urls.set(url,blob);return url},
     revokeObjectURL(url){revoked.push(url);urls.delete(url)}},
     setTimeout(fn,delay){timers.push({fn,delay});return timers.length},
