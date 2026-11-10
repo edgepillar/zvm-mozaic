@@ -1,10 +1,33 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import {crc32} from 'node:zlib'
 import {dialogFixture,imageFixture} from './import-fixture.mjs'
 
 const file = name => ({name})
 const svg = type => new File(['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 4"><rect width="8" height="4" fill="red"/></svg>'],'drawing.svg',{type})
 const png = () => new File(['controlled bytes'],'picture.png',{type:'image/png'})
+
+function pngHeader(width, height) {
+  const header = Buffer.alloc(33)
+  header.writeBigUInt64BE(0x89504e470d0a1a0an)
+  header.writeUInt32BE(13, 8); header.write('IHDR', 12, 'ascii')
+  header.writeUInt32BE(width, 16); header.writeUInt32BE(height, 20); header[24] = 1
+  header.writeUInt32BE(crc32(header.subarray(12, 29)), 29)
+  return header
+}
+function gifWithScreen(width, height, version = '89a') {
+  const bytes = Buffer.from('47494638396101000100800000000000ffffff2c00000000010001000002024401003b', 'hex')
+  bytes.write(version, 3, 'ascii')
+  bytes.writeUInt16LE(width, 6); bytes.writeUInt16LE(height, 8)
+  return bytes
+}
+function fileWithHeader(header, name = 'sample.png', type = 'image/png') {
+  const reads = []
+  return {name, type, size: header.length, reads, slice(start, end) {
+    reads.push([start, end])
+    return {async arrayBuffer() { return Uint8Array.from(header.subarray(start, end)).buffer }}
+  }}
+}
 
 if(process.env.MOZAIC_IMPORT_BATCH_ORIGINAL==='1') {
   test('original synchronous import action opens a picker during a parent file-drop update',async()=>{
@@ -248,5 +271,73 @@ if(process.env.MOZAIC_IMPORT_BATCH_ORIGINAL==='1') {
     assert.equal(f.urls.size, 1)
     f.module.disposeDecoded(value)
     assert.equal(f.urls.size, 0)
+  })
+  test('image rejects oversized PNG and APNG headers before native decoding', async () => {
+    for (const [name, type] of [['oversized.png', 'image/png'], ['oversized.apng', '']]) {
+      const f = await imageFixture(), file = fileWithHeader(pngHeader(4001, 4000), name, type)
+      await assert.rejects(f.module.decode(file), {message: 'Choose a raster image with 16 million pixels or fewer.'})
+      assert.deepEqual(file.reads, [[0, 33]])
+      assert.deepEqual([f.urls.size, f.revoked.length, f.images.length, f.bitmaps.length], [0, 0, 0, 0])
+    }
+  })
+  test('image admits exact PNG and GIF dimensions to native decoding', async () => {
+    for (const [header, name, type] of [
+      [pngHeader(4000, 4000), 'edge.png', 'image/png'],
+      [gifWithScreen(4000, 4000), 'edge.gif', 'image/gif'],
+    ]) {
+      const f = await imageFixture(), file = fileWithHeader(header, name, type)
+      const pending = f.module.decode(file)
+      await f.flush(); f.ready(undefined, 4000, 4000); await f.flush()
+      const bitmap = f.bitmap(), value = await pending
+      assert.equal(value.source, bitmap)
+      assert.deepEqual([value.width, value.height], [4000, 4000])
+      assert.deepEqual(file.reads, [[0, 33]])
+      f.module.disposeDecoded(value)
+      assert.equal(bitmap.closed, 1)
+    }
+  })
+  test('image leaves malformed PNG headers to native decoding', async () => {
+    const crc = pngHeader(4001, 4000); crc[32] ^= 1
+    const color = pngHeader(4001, 4000); color[25] = 5
+    color.writeUInt32BE(crc32(color.subarray(12, 29)), 29)
+    for (const header of [crc, color, pngHeader(4001, 4000).subarray(0, 32), pngHeader(0, 4000)]) {
+      const f = await imageFixture(), pending = f.module.decode(fileWithHeader(header))
+      await f.flush(); f.ready(undefined, 8, 4); await f.flush()
+      const bitmap = f.bitmap(), value = await pending
+      assert.equal(value.source, bitmap)
+      f.module.disposeDecoded(value)
+      assert.equal(bitmap.closed, 1)
+    }
+  })
+  test('image rejects oversized GIF logical screens before native decoding', async () => {
+    for (const version of ['87a', '89a']) {
+      const f = await imageFixture(), file = fileWithHeader(gifWithScreen(4001, 4000, version), 'screen.gif', 'image/gif')
+      await assert.rejects(f.module.decode(file), {message: 'Choose a raster image with 16 million pixels or fewer.'})
+      assert.deepEqual(file.reads, [[0, 33]])
+      assert.deepEqual([f.urls.size, f.revoked.length, f.images.length, f.bitmaps.length], [0, 0, 0, 0])
+    }
+  })
+  test('image preserves the native path for unknown and unreadable prefixes', async () => {
+    const unknown = fileWithHeader(Buffer.from('524946460000000057454250', 'hex'), 'unknown.webp', 'image/webp')
+    const unreadable = {...unknown, slice() { return {async arrayBuffer() { throw new Error('Controlled read failure') }} }}
+    for (const file of [unknown, unreadable]) {
+      const f = await imageFixture(), pending = f.module.decode(file)
+      const rejected = assert.rejects(pending, {message: 'Choose a raster image with 16 million pixels or fewer.'})
+      await f.flush(); f.ready(undefined, 4001, 4000); await rejected
+      assert.deepEqual([f.bitmaps.length, f.urls.size, f.revoked.length], [0, 0, 1])
+    }
+  })
+  test('image aborts a pending header probe before any object URL', async () => {
+    const f = await imageFixture(), abort = new AbortController()
+    let complete
+    const file = {name: 'waiting.png', type: 'image/png', size: 33, slice() {
+      return {arrayBuffer() { return new Promise(resolve => { complete = resolve }) }}
+    }}
+    const pending = f.module.decode(file, abort.signal)
+    const rejected = assert.rejects(pending, {name: 'AbortError'})
+    await f.flush(); assert.equal(typeof complete, 'function')
+    abort.abort(); await rejected
+    complete(Uint8Array.from(pngHeader(4001, 4000)).buffer); await f.flush()
+    assert.deepEqual([f.urls.size, f.revoked.length, f.images.length, f.bitmaps.length], [0, 0, 0, 0])
   })
 }

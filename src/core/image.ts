@@ -81,6 +81,44 @@ async function imageRead<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> 
   }
 }
 
+// A signature, first chunk and valid IHDR checksum are enough to read PNG's
+// canvas dimensions. GIF stores its logical screen immediately after the version.
+const RASTER_PREFIX_BYTES = 33
+const PNG_DEPTHS: Record<number, number[]> = {0: [1, 2, 4, 8, 16], 2: [8, 16], 3: [1, 2, 4, 8], 4: [8, 16], 6: [8, 16]}
+
+function encodedRasterDimensions(bytes: ArrayBuffer): [number, number] | null {
+  const header = new DataView(bytes)
+  if (header.byteLength === RASTER_PREFIX_BYTES && header.getUint32(0) === 0x89504e47
+      && header.getUint32(4) === 0x0d0a1a0a && header.getUint32(8) === 13 && header.getUint32(12) === 0x49484452) {
+    const width = header.getUint32(16), height = header.getUint32(20)
+    if (width === 0 || height === 0 || width > 0x7fffffff || height > 0x7fffffff
+        || !PNG_DEPTHS[header.getUint8(25)]?.includes(header.getUint8(24))
+        || header.getUint8(26) !== 0 || header.getUint8(27) !== 0 || header.getUint8(28) > 1) return null
+    let crc = 0xffffffff
+    for (let offset = 12; offset < 29; offset++) {
+      crc ^= header.getUint8(offset)
+      for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0)
+    }
+    return ((crc ^ 0xffffffff) >>> 0) === header.getUint32(29) ? [width, height] : null
+  }
+  if (header.byteLength < 13 || header.getUint32(0) !== 0x47494638) return null
+  const version = header.getUint16(4)
+  if (version !== 0x3761 && version !== 0x3961) return null
+  const width = header.getUint16(6, true), height = header.getUint16(8, true)
+  return width > 0 && height > 0 ? [width, height] : null
+}
+
+async function readRasterHeader(file: Blob, signal?: AbortSignal) {
+  let prefix: ArrayBuffer
+  try {
+    prefix = await imageRead(file.slice(0, RASTER_PREFIX_BYTES).arrayBuffer(), signal)
+  } catch {
+    if (signal?.aborted) throw cancelledImage()
+    return null
+  }
+  return encodedRasterDimensions(prefix)
+}
+
 /**
  * Decodes any image the browser can show: PNG, JPEG, GIF and WebP (their first
  * frame when animated), AVIF, BMP, favicons (.ico, .cur) and SVG.
@@ -100,6 +138,11 @@ export async function decode(file: File | Blob, signal?: AbortSignal): Promise<D
   if (!isImage({type: file.type, name})) throw new Error('That is not an image.')
   if (file.size > MAX_IMAGE_BYTES) throw new Error('Choose an image of 32 MiB or less.')
   const svg = file.type === 'image/svg+xml' || /\.svg$/i.test(name)
+  if (!svg) {
+    const dimensions = await readRasterHeader(file, signal)
+    check()
+    if (dimensions) checkBitmapSize(...dimensions)
+  }
   const blob = svg && file.type !== 'image/svg+xml'
     ? new Blob([await imageRead(file.text(), signal)], {type: 'image/svg+xml'}) : file
   check()

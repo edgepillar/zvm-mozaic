@@ -342,6 +342,13 @@ function budgetPNG(width, height) {
     chunk('IDAT', deflateSync(rows)), chunk('IEND', Buffer.alloc(0))])
 }
 
+function gifWithScreen(width, height, version = '89a') {
+  const bytes = Buffer.from('47494638396101000100800000000000ffffff2c00000000010001000002024401003b', 'hex')
+  bytes.write(version, 3, 'ascii')
+  bytes.writeUInt16LE(width, 6); bytes.writeUInt16LE(height, 8)
+  return bytes
+}
+
 async function smallImage(page) {
   await page.waitForSelector('dialog[open] [data-testid="as-stamp"]', {visible: true})
   await page.focus('[data-testid="image-width"]'); await page.keyboard.press('Home')
@@ -938,7 +945,7 @@ try {
       await page.waitForFunction(() => document.querySelector('dialog[open]')?.textContent.includes('Choose an image of 32 MiB or less.'))
       await quietExceptHeld(page); assert.equal(f.urls.size, 0)
       assert.equal(await page.$('dialog[open] [data-testid="as-stamp"]'), null)
-      state.phase = 'oversized native PNG dimensions and resource release'
+      state.phase = 'oversized PNG header before native decoding'
       const width = 4001, height = 4000, encoded = budgetPNG(width, height)
       assert.ok(encoded.length > 0 && encoded.length <= 8192)
       const rasterFile = await page.evaluate(encoded => {
@@ -952,7 +959,23 @@ try {
       assert.equal(rasterFile.bytes, encoded.length)
       await page.waitForFunction(() => document.querySelector('dialog[open]')?.textContent.includes('Choose a raster image with 16 million pixels or fewer.'))
       assert.equal(await page.$('dialog[open] [data-testid="as-stamp"]'), null)
-      const failedURL = await onlyImageURL(f); assert.equal(await canReadImageURL(page, failedURL), false)
+      await quietExceptHeld(page); assert.equal(f.urls.size, 0)
+      state.phase = 'oversized GIF logical screen before native decoding'
+      await page.click('dialog[open] button[title="Close"]'); await page.waitForFunction(() => !document.querySelector('dialog[open]'))
+      await showImageImport(page)
+      const gif = gifWithScreen(width, height)
+      const gifFile = await page.evaluate(encoded => {
+        const bytes = Uint8Array.from(atob(encoded), character => character.charCodeAt(0))
+        const file = new File([bytes], 'over-screen-limit.gif', {type: 'image/gif'})
+        const input = document.querySelector('dialog[open] [data-testid="image-input"]')
+        const transfer = new DataTransfer(); transfer.items.add(file); input.files = transfer.files
+        input.dispatchEvent(new Event('change', {bubbles: true}))
+        return {name: file.name, type: file.type, bytes: file.size}
+      }, gif.toString('base64'))
+      assert.equal(gifFile.bytes, gif.length)
+      await page.waitForFunction(() => document.querySelector('dialog[open]')?.textContent.includes('Choose a raster image with 16 million pixels or fewer.'))
+      await quietExceptHeld(page); assert.equal(f.urls.size, 0)
+      assert.equal(await page.$('dialog[open] [data-testid="as-stamp"]'), null)
       state.phase = 'small native PNG replaces the rejected selection'
       const accepted = await chooseImage(page, {name: 'after-limit.png', png: true})
       await smallImage(page)
@@ -962,10 +985,11 @@ try {
       assert.ok(!text.includes('or less.') && !text.includes('or fewer.'))
       await page.click('dialog[open] button[title="Close"]'); await page.waitForFunction(() => !document.querySelector('dialog[open]'))
       await badge(page, 0)
-      results.push({case: name, actualFileInputSelections: 3, byteLimitFile: sourceFile,
+      results.push({case: name, actualFileInputSelections: 4, byteLimitFile: sourceFile,
         actualByteLimitErrorBeforeURLRequest: true, actualOversizedRasterFile: rasterFile,
-        actualRasterFixtureDimensions: [width, height], actualNativeRasterLimitError: true,
-        actualRejectedRasterURLReleased: true, actualSmallPNGRecovery: accepted,
+        actualRasterFixtureDimensions: [width, height], actualPNGHeaderErrorBeforeURLRequest: true,
+        actualGIFScreenFile: gifFile, actualGIFScreenDimensions: [width, height],
+        actualGIFHeaderErrorBeforeURLRequest: true, actualSmallPNGRecovery: accepted,
         actualDisplayedPixelsAfterRecovery: 8, actualDraftPixels: 0, pass: true})
     } else {
       await waitStats(page, 5, 6); await quiet(page); await changeNode(page, '')

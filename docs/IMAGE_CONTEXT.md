@@ -100,11 +100,19 @@ failure releases owned resources and presents a size message in the dialog.
 SVGs use the file budget and the scaled canvas limit. They retain a vector
 source for scaling.
 
-The browser performs its initial native decode before the raster dimension
-check. This bounds the application's bitmap retention, while native decode
-cost and browser-specific peak memory need separate qualification. The Chrome
-case exercises both errors and a subsequent valid file selection. Its large
-dimension PNG uses one-bit rows to keep the encoded fixture small.
+PNG and APNG image dimensions can be read from a checked IHDR prefix. GIF87a
+and GIF89a report their logical screen size immediately after the signature.
+The raster probe reads at most 33 bytes. It checks the PNG signature, chunk
+shape and checksum, and checks the GIF version and screen dimensions. Recognized
+oversize dimensions are rejected before object URL creation. Inconclusive or
+unavailable prefixes continue through the native decoder. The later bitmap
+checks cover the reported natural dimensions and the returned bitmap.
+
+The Chrome case exercises source-byte, PNG and GIF size errors and a subsequent
+valid file selection. Its PNG uses one-bit rows and the GIF stores a one-pixel
+frame in the oversized logical screen. Both fixtures keep their encoded size
+small. Other format headers and native decoder peak memory remain separate
+qualification work.
 
 ## Evidence boundaries
 
@@ -137,7 +145,7 @@ dialog in one page task through
 Every independent scenario is attempted before the verdict, with source,
 browser/platform and delivered production-file digests retained.
 
-Current-source hosted CI checks 211 module/script controls,
+Current-source hosted CI checks 217 module/script controls,
 35 Chrome scenarios against the production bundle, all 35 original isolated contract events, fresh
 contract/ABI drift checks, TypeScript and production build. Wider format/size,
 browser/platform, concurrent modal/tab/crash, real wallet/provider/NoM and
