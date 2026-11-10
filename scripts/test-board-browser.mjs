@@ -349,6 +349,59 @@ function gifWithScreen(width, height, version = '89a') {
   return bytes
 }
 
+function jpegSegment(marker, payload) {
+  const header = Buffer.from([0xff, marker, 0, 0])
+  header.writeUInt16BE(payload.length + 2, 2)
+  return Buffer.concat([header, payload])
+}
+
+function jpegPrefix(width, height, marker = 0xc0, metadataBytes = 0) {
+  const frame = Buffer.from([8, 0, 0, 0, 0, 1, 1, 0x11, 0])
+  frame.writeUInt16BE(height, 1); frame.writeUInt16BE(width, 3)
+  const metadata = metadataBytes ? jpegSegment(0xef, Buffer.alloc(metadataBytes)) : Buffer.alloc(0)
+  return Buffer.concat([Buffer.from([0xff, 0xd8]), metadata, jpegSegment(marker, frame)])
+}
+function webpChunk(type, payload) {
+  const header = Buffer.alloc(8)
+  header.write(type, 0, 'ascii'); header.writeUInt32LE(payload.length, 4)
+  return Buffer.concat([header, payload, Buffer.alloc(payload.length % 2)])
+}
+
+function webpFile(chunks) {
+  const body = Buffer.concat([Buffer.from('WEBP'), ...chunks])
+  const riff = Buffer.alloc(8)
+  riff.write('RIFF', 0, 'ascii'); riff.writeUInt32LE(body.length, 4)
+  return Buffer.concat([riff, body])
+}
+
+function webpCanvas(width, height, flags = 0) {
+  const data = Buffer.alloc(10)
+  data[0] = flags
+  data.writeUIntLE(width - 1, 4, 3); data.writeUIntLE(height - 1, 7, 3)
+  return webpChunk('VP8X', data)
+}
+// A constant one-component JPEG uses two zero Huffman bits per block.
+function budgetJPEG(width, height) {
+  const counts = Buffer.alloc(16); counts[0] = 1
+  const tables = Buffer.concat([Buffer.from([0]), counts, Buffer.from([0, 0x10]), counts, Buffer.from([0])])
+  const bits = 2 * Math.ceil(width / 8) * Math.ceil(height / 8)
+  const scan = Buffer.alloc(Math.ceil(bits / 8))
+  if (bits % 8) scan[scan.length - 1] = (1 << (8 - bits % 8)) - 1
+  return Buffer.concat([jpegPrefix(width, height, 0xc0, 64), jpegSegment(0xdb, Buffer.concat([Buffer.from([0]), Buffer.alloc(64, 1)])),
+    jpegSegment(0xc4, tables), jpegSegment(0xda, Buffer.from([1, 1, 0, 0, 63, 0])), scan, Buffer.from([0xff, 0xd9])])
+}
+
+async function chooseEncodedImage(page, bytes, name, type) {
+  return page.evaluate(({encoded, name, type}) => {
+    const bytes = Uint8Array.from(atob(encoded), character => character.charCodeAt(0))
+    const file = new File([bytes], name, {type})
+    const input = document.querySelector('dialog[open] [data-testid="image-input"]')
+    const transfer = new DataTransfer(); transfer.items.add(file); input.files = transfer.files
+    input.dispatchEvent(new Event('change', {bubbles: true}))
+    return {name: file.name, type: file.type, bytes: file.size}
+  }, {encoded: bytes.toString('base64'), name, type})
+}
+
 async function smallImage(page) {
   await page.waitForSelector('dialog[open] [data-testid="as-stamp"]', {visible: true})
   await page.focus('[data-testid="image-width"]'); await page.keyboard.press('Home')
@@ -976,7 +1029,49 @@ try {
       await page.waitForFunction(() => document.querySelector('dialog[open]')?.textContent.includes('Choose a raster image with 16 million pixels or fewer.'))
       await quietExceptHeld(page); assert.equal(f.urls.size, 0)
       assert.equal(await page.$('dialog[open] [data-testid="as-stamp"]'), null)
-      state.phase = 'small native PNG replaces the rejected selection'
+      const rejectEncoded = async (encoded, name, type) => {
+        state.phase = 'oversized ' + type + ' header before native decoding'
+        await page.click('dialog[open] button[title="Close"]'); await page.waitForFunction(() => !document.querySelector('dialog[open]'))
+        await showImageImport(page)
+        const file = await chooseEncodedImage(page, encoded, name, type)
+        assert.equal(file.bytes, encoded.length)
+        await page.waitForFunction(() => document.querySelector('dialog[open]')?.textContent.includes('Choose a raster image with 16 million pixels or fewer.'))
+        await quietExceptHeld(page); assert.equal(f.urls.size, 0)
+        assert.equal(await page.$('dialog[open] [data-testid="as-stamp"]'), null)
+        return file
+      }
+      const jpeg = budgetJPEG(width, height)
+      assert.ok(jpeg.length <= 65536)
+      const jpegFile = await rejectEncoded(jpeg, 'over-frame-limit.jpg', 'image/jpeg')
+      const frame = Buffer.from(await page.evaluate(async () => {
+        const canvas = document.createElement('canvas'); canvas.width = canvas.height = 1
+        const context = canvas.getContext('2d'); context.fillStyle = '#ff0000'; context.fillRect(0, 0, 1, 1)
+        const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/webp'))
+        if (blob?.type !== 'image/webp' || blob.size > 4096) throw new Error('Small native WebP encoding failed')
+        return Array.from(new Uint8Array(await blob.arrayBuffer()))
+      }))
+      assert.equal(frame.toString('ascii', 0, 4), 'RIFF'); assert.equal(frame.toString('ascii', 8, 12), 'WEBP')
+      let imageChunk
+      for (let offset = 12; offset + 8 <= frame.length;) {
+        const size = frame.readUInt32LE(offset + 4)
+        const end = offset + 8 + size + size % 2
+        assert.ok(end <= frame.length)
+        if (['VP8 ', 'VP8L'].includes(frame.toString('ascii', offset, offset + 4))) {
+          imageChunk = frame.subarray(offset, end); break
+        }
+        offset = end
+      }
+      assert.ok(imageChunk)
+      const frameHeader = Buffer.alloc(16); frameHeader[12] = 100
+      const animated = webpFile([webpCanvas(width, height, 2), webpChunk('ANIM', Buffer.alloc(6)),
+        webpChunk('ANMF', Buffer.concat([frameHeader, imageChunk]))])
+      const webpFileResult = await rejectEncoded(animated, 'over-canvas-limit.webp', 'image/webp')
+      state.phase = 'valid small JPEG from the same generator'
+      const acceptedJPEG = await chooseEncodedImage(page, budgetJPEG(4, 2), 'after-limit.jpg', 'image/jpeg')
+      await smallImage(page)
+      await page.waitForFunction(() => Array.from(document.querySelectorAll('dialog[open] p'))
+        .some(node => node.textContent.trim().startsWith('8 pixels.')))
+      state.phase = 'small native PNG follows the valid JPEG selection'
       const accepted = await chooseImage(page, {name: 'after-limit.png', png: true})
       await smallImage(page)
       await page.waitForFunction(() => Array.from(document.querySelectorAll('dialog[open] p'))
@@ -985,11 +1080,13 @@ try {
       assert.ok(!text.includes('or less.') && !text.includes('or fewer.'))
       await page.click('dialog[open] button[title="Close"]'); await page.waitForFunction(() => !document.querySelector('dialog[open]'))
       await badge(page, 0)
-      results.push({case: name, actualFileInputSelections: 4, byteLimitFile: sourceFile,
+      results.push({case: name, actualFileInputSelections: 7, byteLimitFile: sourceFile,
         actualByteLimitErrorBeforeURLRequest: true, actualOversizedRasterFile: rasterFile,
         actualRasterFixtureDimensions: [width, height], actualPNGHeaderErrorBeforeURLRequest: true,
         actualGIFScreenFile: gifFile, actualGIFScreenDimensions: [width, height],
-        actualGIFHeaderErrorBeforeURLRequest: true, actualSmallPNGRecovery: accepted,
+        actualGIFHeaderErrorBeforeURLRequest: true, actualJPEGFile: jpegFile, actualJPEGFrameDimensions: [width, height],
+        actualJPEGHeaderErrorBeforeURLRequest: true, actualWebPFile: webpFileResult, actualWebPCanvasDimensions: [width, height],
+        actualWebPHeaderErrorBeforeURLRequest: true, actualSmallJPEGRecovery: acceptedJPEG, actualSmallPNGRecovery: accepted,
         actualDisplayedPixelsAfterRecovery: 8, actualDraftPixels: 0, pass: true})
     } else {
       await waitStats(page, 5, 6); await quiet(page); await changeNode(page, '')

@@ -108,8 +108,16 @@ oversize dimensions are rejected before object URL creation. Inconclusive or
 unavailable prefixes continue through the native decoder. The later bitmap
 checks cover the reported natural dimensions and the returned bitmap.
 
-The Chrome case exercises source-byte, PNG and GIF size errors and a subsequent
-valid file selection. Its PNG uses one-bit rows and the GIF stores a one-pixel
+JPEG starts with the same raster probe. If more bytes could complete the frame
+scan, a second read extends the prefix up to 64 KiB in total. The scanner skips
+length-delimited segments and stops before
+scan data. Deferred height, incomplete segments and unknown dimensions continue
+through the native path. WebP checks the first VP8, VP8L or VP8X chunk within the
+33-byte probe after verifying the RIFF size envelope. VP8 and VP8L supply coded
+dimensions and VP8X supplies the canvas size.
+
+The Chrome case exercises source-byte, PNG, GIF, JPEG and WebP size errors
+and subsequent valid JPEG and PNG selections. Its PNG uses one-bit rows and the GIF stores a one-pixel
 frame in the oversized logical screen. Both fixtures keep their encoded size
 small. Other format headers and native decoder peak memory remain separate
 qualification work.
@@ -145,7 +153,7 @@ dialog in one page task through
 Every independent scenario is attempted before the verdict, with source,
 browser/platform and delivered production-file digests retained.
 
-Current-source hosted CI checks 217 module/script controls,
+Current-source hosted CI checks 224 module/script controls,
 35 Chrome scenarios against the production bundle, all 35 original isolated contract events, fresh
 contract/ABI drift checks, TypeScript and production build. Wider format/size,
 browser/platform, concurrent modal/tab/crash, real wallet/provider/NoM and

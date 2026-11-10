@@ -29,6 +29,49 @@ function fileWithHeader(header, name = 'sample.png', type = 'image/png') {
   }}
 }
 
+function jpegSegment(marker, payload) {
+  const header = Buffer.from([0xff, marker, 0, 0])
+  header.writeUInt16BE(payload.length + 2, 2)
+  return Buffer.concat([header, payload])
+}
+
+function jpegPrefix(width, height, marker = 0xc0, metadataBytes = 0) {
+  const frame = Buffer.from([8, 0, 0, 0, 0, 1, 1, 0x11, 0])
+  frame.writeUInt16BE(height, 1); frame.writeUInt16BE(width, 3)
+  const metadata = metadataBytes ? jpegSegment(0xef, Buffer.alloc(metadataBytes)) : Buffer.alloc(0)
+  return Buffer.concat([Buffer.from([0xff, 0xd8]), metadata, jpegSegment(marker, frame)])
+}
+function webpChunk(type, payload) {
+  const header = Buffer.alloc(8)
+  header.write(type, 0, 'ascii'); header.writeUInt32LE(payload.length, 4)
+  return Buffer.concat([header, payload, Buffer.alloc(payload.length % 2)])
+}
+
+function webpFile(chunks) {
+  const body = Buffer.concat([Buffer.from('WEBP'), ...chunks])
+  const riff = Buffer.alloc(8)
+  riff.write('RIFF', 0, 'ascii'); riff.writeUInt32LE(body.length, 4)
+  return Buffer.concat([riff, body])
+}
+
+function webpCanvas(width, height, flags = 0) {
+  const data = Buffer.alloc(10)
+  data[0] = flags
+  data.writeUIntLE(width - 1, 4, 3); data.writeUIntLE(height - 1, 7, 3)
+  return webpChunk('VP8X', data)
+}
+function webpPrefix(kind, width, height) {
+  if (kind === 'VP8X') return webpFile([webpCanvas(width, height)])
+  if (kind === 'VP8L') {
+    const frame = Buffer.alloc(6)
+    frame[0] = 0x2f; frame.writeUInt32LE((width - 1) | ((height - 1) << 14), 1)
+    return webpFile([webpChunk(kind, frame)])
+  }
+  const frame = Buffer.from([0x30, 0, 0, 0x9d, 0x01, 0x2a, 0, 0, 0, 0, 0])
+  frame.writeUInt16LE(width, 6); frame.writeUInt16LE(height, 8)
+  return webpFile([webpChunk('VP8 ', frame)])
+}
+
 if(process.env.MOZAIC_IMPORT_BATCH_ORIGINAL==='1') {
   test('original synchronous import action opens a picker during a parent file-drop update',async()=>{
     const f=await dialogFixture();f.setBatch(file('drop.svg'))
@@ -339,5 +382,83 @@ if(process.env.MOZAIC_IMPORT_BATCH_ORIGINAL==='1') {
     abort.abort(); await rejected
     complete(Uint8Array.from(pngHeader(4001, 4000)).buffer); await f.flush()
     assert.deepEqual([f.urls.size, f.revoked.length, f.images.length, f.bitmaps.length], [0, 0, 0, 0])
+  })
+  test('image rejects oversized JPEG frames within the bounded prefix', async () => {
+    for (const marker of [0xc0, 0xc2, 0xc3, 0xc9, 0xcb]) {
+      const f = await imageFixture(), bytes = jpegPrefix(4001, 4000, marker, 64)
+      const file = fileWithHeader(bytes, 'large.jpg', '')
+      await assert.rejects(f.module.decode(file), {message: 'Choose a raster image with 16 million pixels or fewer.'})
+      assert.deepEqual(file.reads, [[0, 33], [33, 65536]])
+      assert.deepEqual([f.urls.size, f.images.length, f.bitmaps.length], [0, 0, 0])
+    }
+  })
+  test('image admits exact JPEG dimensions without a second read when possible', async () => {
+    const f = await imageFixture()
+    const bytes = Buffer.concat([jpegPrefix(4000, 4000), Buffer.alloc(64)])
+    const file = fileWithHeader(bytes, 'edge.jpg', 'image/jpeg')
+    const pending = f.module.decode(file)
+    await f.flush(); f.ready(undefined, 4000, 4000); await f.flush()
+    const bitmap = f.bitmap(), value = await pending
+    assert.deepEqual([value.width, value.height], [4000, 4000]); assert.deepEqual(file.reads, [[0, 33]])
+    f.module.disposeDecoded(value); assert.equal(bitmap.closed, 1)
+  })
+  test('image leaves deferred and inconclusive JPEG dimensions to native decoding', async () => {
+    const beyond = jpegPrefix(4001, 4000, 0xc0, 65527)
+    const truncated = jpegPrefix(4001, 4000).subarray(0, -1)
+    const deferred = Buffer.concat([jpegPrefix(4001, 0), Buffer.alloc(64)])
+    const scan = Buffer.concat([Buffer.from('ffd8ffda0008', 'hex'), Buffer.alloc(64)])
+    for (const [bytes, extend] of [[deferred, false], [beyond, true], [truncated, false], [scan, false]]) {
+      const f = await imageFixture(), file = fileWithHeader(bytes, 'fallback.jpg', 'image/jpeg')
+      const pending = f.module.decode(file)
+      const rejected = assert.rejects(pending, {message: 'Choose a raster image with 16 million pixels or fewer.'})
+      await f.flush(); f.ready(undefined, 4001, 4000); await rejected
+      assert.deepEqual([f.urls.size, f.revoked.length, f.bitmaps.length], [0, 1, 0])
+      assert.deepEqual(file.reads, extend ? [[0, 33], [33, 65536]] : [[0, 33]])
+    }
+  })
+  test('image aborts the extended JPEG prefix read before creating a URL', async () => {
+    const f = await imageFixture(), abort = new AbortController()
+    const file = fileWithHeader(jpegPrefix(4001, 4000, 0xc0, 64), 'waiting.jpg', 'image/jpeg')
+    const slice = file.slice.bind(file)
+    let complete
+    file.slice = (start, end) => {
+      const part = slice(start, end)
+      return start === 0 ? part : {arrayBuffer: () => new Promise(resolve => { complete = resolve })}
+    }
+    const pending = f.module.decode(file, abort.signal)
+    const rejected = assert.rejects(pending, {name: 'AbortError'})
+    await f.flush(); assert.equal(typeof complete, 'function'); assert.deepEqual(file.reads, [[0, 33], [33, 65536]])
+    abort.abort(); await rejected
+    complete(new ArrayBuffer(0)); await f.flush()
+    assert.deepEqual([f.urls.size, f.images.length, f.bitmaps.length], [0, 0, 0])
+  })
+  test('image rejects oversized VP8 VP8L and VP8X WebP headers in one probe', async () => {
+    for (const kind of ['VP8 ', 'VP8L', 'VP8X']) {
+      const f = await imageFixture(), file = fileWithHeader(webpPrefix(kind, 4001, 4000), 'large.webp', 'image/webp')
+      await assert.rejects(f.module.decode(file), {message: 'Choose a raster image with 16 million pixels or fewer.'})
+      assert.deepEqual(file.reads, [[0, 33]])
+      assert.deepEqual([f.urls.size, f.images.length, f.bitmaps.length], [0, 0, 0])
+    }
+  })
+  test('image admits an exact WebP canvas to native decoding', async () => {
+    const f = await imageFixture(), file = fileWithHeader(webpPrefix('VP8X', 4000, 4000), 'edge.webp', 'image/webp')
+    const pending = f.module.decode(file)
+    await f.flush(); f.ready(undefined, 4000, 4000); await f.flush()
+    const bitmap = f.bitmap(), value = await pending
+    assert.equal(value.source, bitmap); assert.deepEqual(file.reads, [[0, 33]])
+    f.module.disposeDecoded(value); assert.equal(bitmap.closed, 1)
+  })
+  test('image leaves malformed WebP headers to native decoding', async () => {
+    const size = webpPrefix('VP8X', 4001, 4000); size.writeUInt32LE(0xffffffff, 4)
+    const reserved = webpPrefix('VP8X', 4001, 4000); reserved[20] = 1
+    const version = webpPrefix('VP8L', 4001, 4000); version[24] |= 0x20
+    const interframe = webpPrefix('VP8 ', 4001, 4000); interframe[20] |= 1
+    for (const bytes of [size, reserved, version, interframe, webpPrefix('VP8X', 4001, 4000).subarray(0, 29)]) {
+      const f = await imageFixture(), pending = f.module.decode(fileWithHeader(bytes, 'fallback.webp', 'image/webp'))
+      await f.flush(); f.ready(undefined, 8, 4); await f.flush()
+      const bitmap = f.bitmap(), value = await pending
+      assert.equal(value.source, bitmap)
+      f.module.disposeDecoded(value); assert.equal(bitmap.closed, 1)
+    }
   })
 }

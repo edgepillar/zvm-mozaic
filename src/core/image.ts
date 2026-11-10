@@ -86,7 +86,66 @@ async function imageRead<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> 
 const RASTER_PREFIX_BYTES = 33
 const PNG_DEPTHS: Record<number, number[]> = {0: [1, 2, 4, 8, 16], 2: [8, 16], 3: [1, 2, 4, 8], 4: [8, 16], 6: [8, 16]}
 
-function encodedRasterDimensions(bytes: ArrayBuffer): [number, number] | null {
+const JPEG_PREFIX_BYTES = 64 * 1024
+const JPEG_FRAMES = new Set([0xc0, 0xc1, 0xc2, 0xc3, 0xc9, 0xca, 0xcb])
+
+// undefined means the bounded prefix ended before a decision was possible.
+function jpegDimensions(header: DataView): [number, number] | null | undefined {
+  let offset = 2
+  while (offset < header.byteLength) {
+    if (header.getUint8(offset++) !== 0xff) return null
+    while (offset < header.byteLength && header.getUint8(offset) === 0xff) offset++
+    if (offset >= header.byteLength) return undefined
+    const marker = header.getUint8(offset++)
+    if (marker === 0x01) continue // TEM has no length field.
+    // Stop before entropy-coded data or a hierarchical frame sequence.
+    if (marker < 0xc0 || (marker >= 0xd0 && marker <= 0xda) || marker === 0xde) return null
+    if (offset + 2 > header.byteLength) return undefined
+    const length = header.getUint16(offset)
+    if (length < 2) return null
+    if (length > header.byteLength - offset) return undefined
+    if (JPEG_FRAMES.has(marker)) {
+      if (length < 11 || length !== 8 + 3 * header.getUint8(offset + 7)) return null
+      const precision = header.getUint8(offset + 2)
+      const lossless = marker === 0xc3 || marker === 0xcb
+      const validPrecision = lossless ? precision >= 2 && precision <= 16
+        : precision === 8 || (marker !== 0xc0 && precision === 12)
+      const height = header.getUint16(offset + 3), width = header.getUint16(offset + 5)
+      return validPrecision && width > 0 && height > 0 ? [width, height] : null
+    }
+    offset += length
+  }
+  return undefined
+}
+
+function webpDimensions(header: DataView, fileSize: number): [number, number] | null {
+  if (header.byteLength < 25) return null
+  const riffEnd = header.getUint32(4, true) + 8
+  const chunkSize = header.getUint32(16, true)
+  if (riffEnd > fileSize || riffEnd % 2 !== 0 || 20 + chunkSize + chunkSize % 2 > riffEnd) return null
+  const chunk = header.getUint32(12)
+  if (chunk === 0x5650384c && chunkSize >= 5 && header.getUint8(20) === 0x2f) { // VP8L
+    const fields = header.getUint32(21, true)
+    return (fields >>> 29) === 0 ? [(fields & 0x3fff) + 1, ((fields >>> 14) & 0x3fff) + 1] : null
+  }
+  if (header.byteLength < 30) return null
+  if (chunk === 0x56503858 && chunkSize === 10) { // VP8X
+    if ((header.getUint8(20) & 0xc1) !== 0 || (header.getUint32(20, true) >>> 8) !== 0) return null
+    const width = 1 + header.getUint16(24, true) + header.getUint8(26) * 65536
+    const height = 1 + header.getUint16(27, true) + header.getUint8(29) * 65536
+    return width * height <= 0xffffffff ? [width, height] : null
+  }
+  if (chunk === 0x56503820 && chunkSize >= 10 && header.getUint8(23) === 0x9d && header.getUint16(24) === 0x012a) { // VP8
+    const tag = header.getUint16(20, true) + header.getUint8(22) * 65536
+    const partition = tag >>> 5
+    if ((tag & 1) !== 0 || ((tag >>> 1) & 7) > 3 || partition === 0 || partition > chunkSize - 10) return null
+    const width = header.getUint16(26, true) & 0x3fff, height = header.getUint16(28, true) & 0x3fff
+    return width > 0 && height > 0 ? [width, height] : null
+  }
+  return null
+}
+
+function encodedRasterDimensions(bytes: ArrayBuffer, fileSize: number): [number, number] | null {
   const header = new DataView(bytes)
   if (header.byteLength === RASTER_PREFIX_BYTES && header.getUint32(0) === 0x89504e47
       && header.getUint32(4) === 0x0d0a1a0a && header.getUint32(8) === 13 && header.getUint32(12) === 0x49484452) {
@@ -101,6 +160,9 @@ function encodedRasterDimensions(bytes: ArrayBuffer): [number, number] | null {
     }
     return ((crc ^ 0xffffffff) >>> 0) === header.getUint32(29) ? [width, height] : null
   }
+  if (header.byteLength >= 12 && header.getUint32(0) === 0x52494646 && header.getUint32(8) === 0x57454250) {
+    return webpDimensions(header, fileSize)
+  }
   if (header.byteLength < 13 || header.getUint32(0) !== 0x47494638) return null
   const version = header.getUint16(4)
   if (version !== 0x3761 && version !== 0x3961) return null
@@ -112,11 +174,22 @@ async function readRasterHeader(file: Blob, signal?: AbortSignal) {
   let prefix: ArrayBuffer
   try {
     prefix = await imageRead(file.slice(0, RASTER_PREFIX_BYTES).arrayBuffer(), signal)
+    const initial = new DataView(prefix)
+    if (initial.byteLength >= 2 && initial.getUint16(0) === 0xffd8) {
+      const dimensions = jpegDimensions(initial)
+      if (dimensions !== undefined || file.size <= prefix.byteLength) return dimensions ?? null
+      if (signal?.aborted) throw cancelledImage()
+      const remainder = await imageRead(file.slice(prefix.byteLength, JPEG_PREFIX_BYTES).arrayBuffer(), signal)
+      const jpeg = new Uint8Array(prefix.byteLength + remainder.byteLength)
+      jpeg.set(new Uint8Array(prefix))
+      jpeg.set(new Uint8Array(remainder), prefix.byteLength)
+      return jpegDimensions(new DataView(jpeg.buffer)) ?? null
+    }
   } catch {
     if (signal?.aborted) throw cancelledImage()
     return null
   }
-  return encodedRasterDimensions(prefix)
+  return encodedRasterDimensions(prefix, file.size)
 }
 
 /**
