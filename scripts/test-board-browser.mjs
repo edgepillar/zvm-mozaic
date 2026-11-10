@@ -1311,12 +1311,17 @@ try {
         return el?.getAttribute('data-testid') || el?.getAttribute('title') || ''
       })
       const waitFocus = selector => page.waitForFunction(selector => document.activeElement?.matches(selector), {}, selector)
+      const tabBackward = async () => {
+        await page.keyboard.down('Shift')
+        try {await page.keyboard.press('Tab')}
+        finally {await page.keyboard.up('Shift')}
+      }
       const axNames = []
       await page.focus(node); await page.keyboard.press('Enter')
       await waitFocus(NODE_RPC)
       const nodeInitialFocus = await focused()
       axNames.push(await dialogAccessibleName(page, session, 'Node and canvas'))
-      await page.keyboard.press('Shift+Tab')
+      await tabBackward()
       const nodeBack = await focused()
       await page.keyboard.press('Tab')
       const nodeForward = await focused()
@@ -1347,7 +1352,7 @@ try {
       const imageInitial = await focused()
       await page.keyboard.press('Tab')
       const imageForward = await focused()
-      await page.keyboard.press('Shift+Tab')
+      await tabBackward()
       const imageBack = await focused()
       assert.deepEqual([imageInitial, imageForward, imageBack], ['Close', 'image-width', 'Close'])
       const inert = await page.evaluate(help => {
