@@ -172,14 +172,22 @@ function svgSize(text: string): [number, number] | null {
   return null
 }
 
+// A stamp or guide fits within the shared board before allocating its raster.
+const PICTURE_EDGE = 1000
+
+export function pictureWidthLimit(image: Decoded): number {
+  const widthAtMaxHeight = Math.round(PICTURE_EDGE * (image.width / image.height))
+  return Math.min(PICTURE_EDGE, Math.max(1, widthAtMaxHeight))
+}
+
 /**
- * Scales an image to `width` canvas pixels, keeping its shape. Smoothing is
+ * Scales an image toward `width` canvas pixels, fitting the board. Smoothing is
  * off when enlarging, so pixel art stays crisp, and on when shrinking, so a
  * photo averages rather than aliases.
  */
 export function scaled(image: Decoded, width: number, name: string): Picture {
-  const w = Math.max(1, Math.round(width))
-  const h = Math.max(1, Math.round((image.height * w) / image.width))
+  const w = Math.min(pictureWidthLimit(image), Math.max(1, Math.round(width)))
+  const h = Math.min(PICTURE_EDGE, Math.max(1, Math.round((image.height * w) / image.width)))
   const canvas = document.createElement('canvas')
   canvas.width = w
   canvas.height = h

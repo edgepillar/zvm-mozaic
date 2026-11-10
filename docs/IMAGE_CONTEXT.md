@@ -65,6 +65,18 @@ the final visible write. The Chrome scenario places a four-by-two PNG at the
 right edge. It checks all eight preview pixels and the exact coordinates and
 colors of the four pixels saved in IndexedDB.
 
+## Picture dimensions
+
+Imported stamps and guides fit within the 1000-by-1000 board before the
+scaled canvas is allocated. The width control follows the picture aspect
+ratio and can reach one pixel for narrow imports. The on-screen preview keeps
+at least one pixel on each axis. Images already within the board keep their
+requested raster dimensions and existing alpha membership.
+
+The tall SVG witness uses a 4-by-4000 input, a 1-by-1000 picture and a
+1-by-240 preview. The dimensions bound the scaled canvas and its pixel
+readback. Source image decoding still uses the browser's existing path.
+
 ## Evidence boundaries
 
 The memory controls execute the actual ImportDialog SFC script with an explicit

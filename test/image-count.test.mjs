@@ -81,3 +81,21 @@ test('stamp points read only the board overlap and retain picture coordinates', 
   assert.equal(module.pixelsOf(p, undefined, {x: 4, y: 0, w: 1, h: 1}).length, 0)
   assert.deepEqual(reads, [])
 })
+
+test('image scaling fits both board dimensions and retains in-bounds requests', async () => {
+  const {module} = await imageFixture()
+  for (const [width, height, requested, expected] of [
+    [4, 4000, 128, [1, 1000]],
+    [9, 1999, 1000, [5, 1000]],
+    [1, 4096, 1, [1, 1000]],
+    [4000, 1, 2500, [1000, 1]],
+    [1000, 1000, 1000, [1000, 1000]],
+    [1000, 1001, 999, [999, 1000]],
+    [100, 29, 50, [50, 15]],
+    [4, 2, 4, [4, 2]],
+  ]) {
+    const picture = module.scaled({width, height, source: {}, vector: false}, requested, 'Controlled image')
+    assert.deepEqual([picture.w, picture.h], expected)
+    assert.deepEqual([picture.canvas.width, picture.canvas.height], expected)
+  }
+})

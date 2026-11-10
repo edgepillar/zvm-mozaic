@@ -128,4 +128,21 @@ if(process.env.MOZAIC_IMPORT_BATCH_ORIGINAL==='1') {
     assert.equal(f.pickerCount(),0);assert.equal(f.requests.length,1)
     f.resolve(0,'drop');await f.flush();assert.equal(f.state().bitmap.id,'drop');f.unmount()
   })
+  test('import keeps a tall image selectable and its preview drawable', async () => {
+    const {module} = await imageFixture()
+    const f = await dialogFixture({pictureWidthLimit: module.pictureWidthLimit, scaled: module.scaled})
+    const draws = []
+    const preview = {width: 0, height: 0, getContext: () => ({
+      drawImage(canvas, x, y, w, h) {draws.push([canvas.width, canvas.height, x, y, w, h])},
+    })}
+    f.setPreview(preview)
+    f.select(file('tall.svg'))
+    f.resolve(0, 'tall', 4, 4000)
+    await f.flush()
+    const {width, picture} = f.state()
+    assert.deepEqual(Array.from(f.range()), [1, 1])
+    assert.deepEqual([width, picture.w, picture.h, preview.width, preview.height], [1, 1, 1000, 1, 240])
+    assert.deepEqual(draws, [[1, 1000, 0, 0, 1, 240]])
+    f.unmount()
+  })
 }

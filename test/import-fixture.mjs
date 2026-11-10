@@ -84,14 +84,14 @@ async function moduleWithPorts(code,ports,globals,identifier) {
 }
 const deferred = () => {let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b});return {promise,resolve,reject}}
 
-export async function dialogFixture() {
+export async function dialogFixture(sizing = {}) {
   const v=vuePorts(), requests=[], disposed=[], emissions=[], stamp={value:null}, guide={picture:null,x:0,y:0,visible:false}
   const props=v.vue.reactive({open:false,file:null,at:{x:50,y:60}})
   const ports={vue:v.vue,'../core/image':{
     decode(file,signal) {const d=deferred();requests.push({file,signal,...d});return d.promise},
     disposeDecoded(value) {if(value)disposed.push(value.id)},guide,stamp,
     scaled(value,width,name) {return {name,w:width,h:Math.round(width*value.height/value.width),canvas:{id:value.id}}},
-    pixelsOf:()=>[{x:0,y:0,rgb:1}],pixelCount:()=>1},
+    pictureWidthLimit:()=>1000, pixelsOf:()=>[{x:0,y:0,rgb:1}],pixelCount:()=>1, ...sizing},
     '../core/endpoint':{endpoint:{canvas:null}},'../core/format':{number:String,units:String},
     './Modal.vue':{default:{}},'./Icon.vue':{default:{}}}
   const source=readFileSync(new URL('../src/components/ImportDialog.vue',import.meta.url),'utf8')
@@ -100,6 +100,8 @@ export async function dialogFixture() {
   const tail=`\nexport const __calls={load,finish,asStamp,asGuide,pick};
 export function __state(){return {bitmap:bitmap.value,name:name.value,width:width.value,error:error.value,picture:picture.value}}
 export function __fileInput(value){input.value=value}
+export function __range(){return [minWidth.value,maxWidth.value]}
+export function __preview(value){previewEl.value=value}
 `
   const namespace=await moduleWithPorts(script+tail,ports,{defineProps:()=>props,defineEmits:()=>type=>{emissions.push(type);if(type==='close')props.open=false}},'actual-import-dialog-script')
   let pickerClicks=0
@@ -111,6 +113,7 @@ export function __fileInput(value){input.value=value}
     select(file){props.file=file;props.open=true;v.flush()},
     choose(file){namespace.__calls.pick({target:{files:[file],value:'selected'}});v.flush()},
     calls:namespace.__calls,state:()=>namespace.__state(),
+    range:()=>namespace.__range(), setPreview(value){namespace.__preview(value);v.flush()},
     resolve(i,id='image-'+i,width=8,height=4){requests[i].resolve({id,width,height,source:{id},vector:false})},
     reject(i,message='Controlled image failure'){requests[i].reject(new Error(message))},
     unmount(){v.unmount()}}

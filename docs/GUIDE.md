@@ -242,9 +242,9 @@ What it adds over Satoshi's Place, which had one pencil and sixteen colours:
   tolerance (the whole canvas if need be), gradient fill, spray, colour picker (or Alt-click), and move.
 - **Brush opacity** blends over what's there. **Mirror** painting works
   left-right, top-bottom, or both.
-- **Images:** stamp one into the draft at any width, or pin it as a
-  see-through guide to trace. Choose a file, drop it on the canvas, or paste
-  it with Ctrl+V.
+- **Images:** stamp an image into the draft, or pin it as a see-through
+  guide to trace. Its scaled width and height fit within the board. Choose a
+  file, drop it on the canvas, or paste it with Ctrl+V.
 - **A free draft** up to the whole canvas, with undo and redo, kept across
   reloads. It shows the cost live, and drafted pixels that already match the
   canvas are free. More than one transaction is painted through a **paint

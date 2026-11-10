@@ -3,7 +3,7 @@
 // costs, then either hold it as a stamp to click into the draft, or pin it
 // over the canvas as a guide to trace.
 import {computed, onBeforeUnmount, ref, shallowRef, watch} from 'vue'
-import {decode, disposeDecoded, guide, pixelCount, scaled, stamp, type Decoded, type Picture} from '../core/image'
+import {decode, disposeDecoded, guide, pictureWidthLimit, pixelCount, scaled, stamp, type Decoded, type Picture} from '../core/image'
 import {endpoint} from '../core/endpoint'
 import {number, units} from '../core/format'
 import Modal from './Modal.vue'
@@ -18,6 +18,11 @@ const width = ref(64)
 const error = ref('')
 const input = ref<HTMLInputElement | null>(null)
 const previewEl = ref<HTMLCanvasElement | null>(null)
+const maxWidth = computed(() => {
+  const image = bitmap.value
+  return image ? Math.min(pictureWidthLimit(image), Math.max(8, image.width) * 4) : 4
+})
+const minWidth = computed(() => Math.min(4, maxWidth.value, bitmap.value?.width ?? 4))
 
 let generation = 0
 let disposed = false
@@ -50,7 +55,7 @@ async function load(f: File) {
     name.value = f.name || 'Pasted image'
     if (!owns(ticket)) return
     // A full-size photo can be a million pixels; start with a small stamp.
-    width.value = Math.min(next.width, 128)
+    width.value = Math.min(next.width, 128, maxWidth.value)
   } catch (err: any) {
     if (!owns(ticket)) return
     const previous = bitmap.value
@@ -83,8 +88,8 @@ const pixels = computed(() => (picture.value ? pixelCount(picture.value) : 0))
 watch([picture, previewEl], ([p, el]) => {
   if (!p || !el) return
   const k = Math.min(1, 240 / Math.max(p.w, p.h)) * Math.max(1, Math.floor(240 / Math.max(p.w, p.h)))
-  el.width = Math.round(p.w * k)
-  el.height = Math.round(p.h * k)
+  el.width = Math.max(1, Math.round(p.w * k))
+  el.height = Math.max(1, Math.round(p.h * k))
   const c = el.getContext('2d')!
   c.imageSmoothingEnabled = false
   c.drawImage(p.canvas, 0, 0, el.width, el.height)
@@ -123,7 +128,6 @@ function pick(e: Event) {
   ;(e.target as HTMLInputElement).value = ''
 }
 
-const maxWidth = computed(() => Math.min(1000, Math.max(8, bitmap.value?.width ?? 1000) * 4))
 </script>
 
 <template>
@@ -147,7 +151,7 @@ const maxWidth = computed(() => Math.min(1000, Math.max(8, bitmap.value?.width ?
           <input
             v-model.number="width"
             type="range"
-            min="4"
+            :min="minWidth"
             :max="maxWidth"
             class="range"
             :style="{'--fill': `${(width / maxWidth) * 100}%`}"
