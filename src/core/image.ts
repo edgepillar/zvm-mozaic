@@ -86,7 +86,7 @@ async function imageRead<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> 
 const RASTER_PREFIX_BYTES = 33
 const PNG_DEPTHS: Record<number, number[]> = {0: [1, 2, 4, 8, 16], 2: [8, 16], 3: [1, 2, 4, 8], 4: [8, 16], 6: [8, 16]}
 
-const JPEG_PREFIX_BYTES = 64 * 1024
+const EXTENDED_RASTER_PREFIX_BYTES = 64 * 1024
 const JPEG_FRAMES = new Set([0xc0, 0xc1, 0xc2, 0xc3, 0xc9, 0xca, 0xcb])
 
 // undefined means the bounded prefix ended before a decision was possible.
@@ -145,6 +145,130 @@ function webpDimensions(header: DataView, fileSize: number): [number, number] | 
   return null
 }
 
+const BMP_INFO_HEADERS = new Set([40, 52, 56, 108, 124])
+const BMP_INFO_PREFIX_BYTES = 34
+
+function bmpDimensions(header: DataView, fileSize: number): [number, number] | null {
+  if (header.byteLength < 26 || header.getUint32(2, true) !== fileSize || header.getUint32(6, true) !== 0) return null
+  const pixelOffset = header.getUint32(10, true), dibSize = header.getUint32(14, true)
+  if (pixelOffset < 14 + dibSize || pixelOffset >= fileSize) return null
+  const core = dibSize === 12
+  if (!core && (header.byteLength < BMP_INFO_PREFIX_BYTES || !BMP_INFO_HEADERS.has(dibSize))) return null
+  const width = core ? header.getUint16(18, true) : header.getInt32(18, true)
+  const signedHeight = core ? header.getUint16(20, true) : header.getInt32(22, true)
+  if (width <= 0 || signedHeight === 0 || signedHeight === -0x80000000 || header.getUint16(core ? 22 : 26, true) !== 1) return null
+  const depth = header.getUint16(core ? 24 : 28, true)
+  const compression = core ? 0 : header.getUint32(30, true)
+  const height = Math.abs(signedHeight)
+  const rgb = compression === 0 && (core ? [1, 4, 8, 24] : [1, 4, 8, 16, 24, 32]).includes(depth)
+  const bitfields = compression === 3 && (depth === 16 || depth === 32) && (dibSize !== 40 || pixelOffset >= 66)
+  const rle = signedHeight > 0 && ((compression === 1 && depth === 8) || (compression === 2 && depth === 4))
+  if (!rgb && !bitfields && !rle) return null
+  const rowBytes = Math.ceil(width * depth / 32) * 4
+  return rle || height <= Math.floor((fileSize - pixelOffset) / rowBytes) ? [width, height] : null
+}
+
+type AVIFBox = {type: string; start: number; end: number}
+
+// Walk box boundaries without reading payloads such as the final media data.
+function avifBoxes(header: DataView, start: number, end: number): AVIFBox[] | null {
+  const boxes: AVIFBox[] = []
+  for (let offset = start; offset < end;) {
+    if (offset + 8 > Math.min(end, header.byteLength)) return null
+    const type = String.fromCharCode(header.getUint8(offset + 4), header.getUint8(offset + 5),
+      header.getUint8(offset + 6), header.getUint8(offset + 7))
+    let size = header.getUint32(offset), headerSize = 8
+    if (size === 1) {
+      headerSize = 16
+      if (offset + headerSize > Math.min(end, header.byteLength) || header.getUint32(offset + 8) !== 0) return null
+      size = header.getUint32(offset + 12)
+    } else if (size === 0 && start === 0 && type === 'mdat') {
+      size = end - offset
+    }
+    if (size < headerSize || size > end - offset) return null
+    boxes.push({type, start: offset + headerSize, end: offset + size})
+    offset += size
+  }
+  return boxes
+}
+
+function oneAVIFBox(boxes: AVIFBox[], type: string) {
+  const matches = boxes.filter(box => box.type === type)
+  return matches.length === 1 ? matches[0] : null
+}
+
+// Rotation and mirroring preserve area. Properties outside this list can
+// change which extent the renderer uses, so leave them to the native decoder.
+const AVIF_AREA_PRESERVING = new Set(['av1C', 'pixi', 'colr', 'irot', 'imir', 'clli', 'mdcv'])
+
+function avifPrimaryExtent(header: DataView, associations: AVIFBox[], properties: AVIFBox[], primary: number): AVIFBox | null {
+  let extent: AVIFBox | null = null, foundPrimary = false
+  for (const box of associations) {
+    if (box.start + 8 > box.end) return null
+    const format = header.getUint32(box.start)
+    const version = format >>> 24
+    if (version > 1 || (format & 0xfffffe) !== 0) return null
+    const wideIndex = (format & 1) !== 0, indexBytes = wideIndex ? 2 : 1
+    const idBytes = version === 0 ? 2 : 4
+    const entries = header.getUint32(box.start + 4)
+    let offset = box.start + 8
+    for (let entry = 0; entry < entries; entry++) {
+      if (offset + idBytes + 1 > box.end) return null
+      const id = version === 0 ? header.getUint16(offset) : header.getUint32(offset)
+      offset += idBytes
+      const count = header.getUint8(offset++)
+      const next = offset + count * indexBytes
+      if (next > box.end) return null
+      if (id === primary) {
+        if (foundPrimary) return null
+        foundPrimary = true
+        for (; offset < next; offset += indexBytes) {
+          const index = wideIndex ? header.getUint16(offset) & 0x7fff : header.getUint8(offset) & 0x7f
+          if (index === 0) continue
+          const property = properties[index - 1]
+          if (!property) return null
+          if (property.type === 'ispe') {
+            if (extent) return null
+            extent = property
+          } else if (!AVIF_AREA_PRESERVING.has(property.type)) return null
+        }
+      }
+      offset = next
+    }
+    if (offset !== box.end) return null
+  }
+  return extent
+}
+
+function avifDimensions(header: DataView, fileSize: number): [number, number] | null {
+  const boxes = avifBoxes(header, 0, fileSize)
+  if (!boxes || boxes.some(box => box.type === 'moov')) return null
+  const ftyp = oneAVIFBox(boxes, 'ftyp'), meta = oneAVIFBox(boxes, 'meta')
+  if (!ftyp || ftyp.end > header.byteLength || ftyp.start + 8 > ftyp.end || (ftyp.end - ftyp.start) % 4 !== 0
+      || header.getUint32(ftyp.start) !== 0x61766966) return null // avif
+  for (let offset = ftyp.start + 8; offset < ftyp.end; offset += 4) {
+    if (header.getUint32(offset) === 0x61766973) return null // avis
+  }
+  if (!meta || meta.end > header.byteLength || meta.start + 4 > meta.end || header.getUint32(meta.start) !== 0) return null
+  const items = avifBoxes(header, meta.start + 4, meta.end)
+  if (!items || items.some(box => box.type === 'grpl')) return null
+  const primary = oneAVIFBox(items, 'pitm'), itemProperties = oneAVIFBox(items, 'iprp')
+  if (!primary || !itemProperties || primary.start + 6 > primary.end) return null
+  const format = header.getUint32(primary.start), size = primary.end - primary.start
+  const id = format === 0 && size === 6 ? header.getUint16(primary.start + 4)
+    : format === 0x01000000 && size === 8 ? header.getUint32(primary.start + 4) : 0
+  if (id === 0) return null
+  const propertyBoxes = avifBoxes(header, itemProperties.start, itemProperties.end)
+  if (!propertyBoxes) return null
+  const container = oneAVIFBox(propertyBoxes, 'ipco')
+  const properties = container && avifBoxes(header, container.start, container.end)
+  if (!properties) return null
+  const extent = avifPrimaryExtent(header, propertyBoxes.filter(box => box.type === 'ipma'), properties, id)
+  if (!extent || extent.start + 12 !== extent.end || header.getUint32(extent.start) !== 0) return null
+  const width = header.getUint32(extent.start + 4), height = header.getUint32(extent.start + 8)
+  return width > 0 && height > 0 ? [width, height] : null
+}
+
 function encodedRasterDimensions(bytes: ArrayBuffer, fileSize: number): [number, number] | null {
   const header = new DataView(bytes)
   if (header.byteLength === RASTER_PREFIX_BYTES && header.getUint32(0) === 0x89504e47
@@ -170,26 +294,41 @@ function encodedRasterDimensions(bytes: ArrayBuffer, fileSize: number): [number,
   return width > 0 && height > 0 ? [width, height] : null
 }
 
+async function extendRasterPrefix(file: Blob, prefix: ArrayBuffer, end: number, signal?: AbortSignal) {
+  if (signal?.aborted) throw cancelledImage()
+  const remainder = await imageRead(file.slice(prefix.byteLength, end).arrayBuffer(), signal)
+  const bytes = new Uint8Array(prefix.byteLength + remainder.byteLength)
+  bytes.set(new Uint8Array(prefix))
+  bytes.set(new Uint8Array(remainder), prefix.byteLength)
+  return new DataView(bytes.buffer)
+}
+
 async function readRasterHeader(file: Blob, signal?: AbortSignal) {
-  let prefix: ArrayBuffer
   try {
-    prefix = await imageRead(file.slice(0, RASTER_PREFIX_BYTES).arrayBuffer(), signal)
+    const prefix = await imageRead(file.slice(0, RASTER_PREFIX_BYTES).arrayBuffer(), signal)
     const initial = new DataView(prefix)
     if (initial.byteLength >= 2 && initial.getUint16(0) === 0xffd8) {
       const dimensions = jpegDimensions(initial)
       if (dimensions !== undefined || file.size <= prefix.byteLength) return dimensions ?? null
-      if (signal?.aborted) throw cancelledImage()
-      const remainder = await imageRead(file.slice(prefix.byteLength, JPEG_PREFIX_BYTES).arrayBuffer(), signal)
-      const jpeg = new Uint8Array(prefix.byteLength + remainder.byteLength)
-      jpeg.set(new Uint8Array(prefix))
-      jpeg.set(new Uint8Array(remainder), prefix.byteLength)
-      return jpegDimensions(new DataView(jpeg.buffer)) ?? null
+      return jpegDimensions(await extendRasterPrefix(file, prefix, EXTENDED_RASTER_PREFIX_BYTES, signal)) ?? null
     }
+    if (initial.byteLength >= 26 && initial.getUint16(0) === 0x424d) { // BM
+      const dib = initial.getUint32(14, true)
+      const header = BMP_INFO_HEADERS.has(dib) && initial.byteLength === RASTER_PREFIX_BYTES && file.size > prefix.byteLength
+        ? await extendRasterPrefix(file, prefix, BMP_INFO_PREFIX_BYTES, signal) : initial
+      return bmpDimensions(header, file.size)
+    }
+    if (initial.byteLength >= 16 && initial.getUint32(4) === 0x66747970 && initial.getUint32(8) === 0x61766966
+        && initial.getUint32(0) >= 16 && initial.getUint32(0) <= file.size) { // ftyp, avif
+      const header = file.size > prefix.byteLength
+        ? await extendRasterPrefix(file, prefix, EXTENDED_RASTER_PREFIX_BYTES, signal) : initial
+      return avifDimensions(header, file.size)
+    }
+    return encodedRasterDimensions(prefix, file.size)
   } catch {
     if (signal?.aborted) throw cancelledImage()
     return null
   }
-  return encodedRasterDimensions(prefix, file.size)
 }
 
 /**

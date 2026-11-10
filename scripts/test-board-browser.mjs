@@ -391,15 +391,43 @@ function budgetJPEG(width, height) {
     jpegSegment(0xc4, tables), jpegSegment(0xda, Buffer.from([1, 1, 0, 0, 63, 0])), scan, Buffer.from([0xff, 0xd9])])
 }
 
-async function chooseEncodedImage(page, bytes, name, type) {
-  return page.evaluate(({encoded, name, type}) => {
+// The zero-filled payload is a valid one-bit BMP with two palette entries.
+function budgetBMP(width, height, {dib = 40, depth = 1, compression = 0} = {}) {
+  const core = dib === 12
+  const pixels = 14 + dib + (core ? 6 : 8)
+  const body = compression === 0 ? Math.ceil(width * depth / 32) * 4 * Math.abs(height) : 2
+  const total = pixels + body
+  const header = Buffer.alloc(pixels)
+  header.write('BM'); header.writeUInt32LE(total, 2); header.writeUInt32LE(pixels, 10); header.writeUInt32LE(dib, 14)
+  if (core) {
+    header.writeUInt16LE(width, 18); header.writeUInt16LE(height, 20)
+    header.writeUInt16LE(1, 22); header.writeUInt16LE(depth, 24)
+  } else {
+    header.writeInt32LE(width, 18); header.writeInt32LE(height, 22)
+    header.writeUInt16LE(1, 26); header.writeUInt16LE(depth, 28)
+    header.writeUInt32LE(compression, 30); header.writeUInt32LE(body, 34)
+  }
+  return {header, total}
+}
+
+function smallIcon(cursor) {
+  const png = budgetPNG(4, 2), directory = Buffer.alloc(22)
+  directory.writeUInt16LE(cursor ? 2 : 1, 2); directory.writeUInt16LE(1, 4)
+  directory[6] = 4; directory[7] = 2
+  if (!cursor) {directory.writeUInt16LE(1, 10); directory.writeUInt16LE(1, 12)}
+  directory.writeUInt32LE(png.length, 14); directory.writeUInt32LE(directory.length, 18)
+  return Buffer.concat([directory, png])
+}
+
+async function chooseEncodedImage(page, bytes, name, type, total = bytes.length) {
+  return page.evaluate(({encoded, name, type, total}) => {
     const bytes = Uint8Array.from(atob(encoded), character => character.charCodeAt(0))
-    const file = new File([bytes], name, {type})
+    const file = new File([bytes, new Uint8Array(total - bytes.length)], name, {type})
     const input = document.querySelector('dialog[open] [data-testid="image-input"]')
     const transfer = new DataTransfer(); transfer.items.add(file); input.files = transfer.files
     input.dispatchEvent(new Event('change', {bubbles: true}))
     return {name: file.name, type: file.type, bytes: file.size}
-  }, {encoded: bytes.toString('base64'), name, type})
+  }, {encoded: bytes.toString('base64'), name, type, total})
 }
 
 async function smallImage(page) {
@@ -1029,12 +1057,12 @@ try {
       await page.waitForFunction(() => document.querySelector('dialog[open]')?.textContent.includes('Choose a raster image with 16 million pixels or fewer.'))
       await quietExceptHeld(page); assert.equal(f.urls.size, 0)
       assert.equal(await page.$('dialog[open] [data-testid="as-stamp"]'), null)
-      const rejectEncoded = async (encoded, name, type) => {
+      const rejectEncoded = async (encoded, name, type, total = encoded.length) => {
         state.phase = 'oversized ' + type + ' header before native decoding'
         await page.click('dialog[open] button[title="Close"]'); await page.waitForFunction(() => !document.querySelector('dialog[open]'))
         await showImageImport(page)
-        const file = await chooseEncodedImage(page, encoded, name, type)
-        assert.equal(file.bytes, encoded.length)
+        const file = await chooseEncodedImage(page, encoded, name, type, total)
+        assert.equal(file.bytes, total)
         await page.waitForFunction(() => document.querySelector('dialog[open]')?.textContent.includes('Choose a raster image with 16 million pixels or fewer.'))
         await quietExceptHeld(page); assert.equal(f.urls.size, 0)
         assert.equal(await page.$('dialog[open] [data-testid="as-stamp"]'), null)
@@ -1066,6 +1094,25 @@ try {
       const animated = webpFile([webpCanvas(width, height, 2), webpChunk('ANIM', Buffer.alloc(6)),
         webpChunk('ANMF', Buffer.concat([frameHeader, imageChunk]))])
       const webpFileResult = await rejectEncoded(animated, 'over-canvas-limit.webp', 'image/webp')
+      const bmp = budgetBMP(width, -height)
+      const bmpFile = await rejectEncoded(bmp.header, 'over-bitmap-limit.bmp', 'image/bmp', bmp.total)
+      const avif = readFileSync('test/fixtures/budget-large.avif')
+      const avifFile = await rejectEncoded(avif, 'over-primary-limit.avif', 'image/avif')
+      const acceptEncoded = async (encoded, name, type, total = encoded.length) => {
+        state.phase = 'valid ' + name + ' after encoded size errors'
+        await page.click('dialog[open] button[title="Close"]'); await page.waitForFunction(() => !document.querySelector('dialog[open]'))
+        await showImageImport(page)
+        const file = await chooseEncodedImage(page, encoded, name, type, total)
+        await smallImage(page)
+        await page.waitForFunction(() => Array.from(document.querySelectorAll('dialog[open] p'))
+          .some(node => node.textContent.trim().startsWith('8 pixels.')))
+        return file
+      }
+      const tinyBMP = budgetBMP(4, -2)
+      const acceptedBMP = await acceptEncoded(tinyBMP.header, 'after-limit.bmp', 'image/bmp', tinyBMP.total)
+      const acceptedAVIF = await acceptEncoded(readFileSync('test/fixtures/budget-small.avif'), 'after-limit.avif', 'image/avif')
+      const acceptedICO = await acceptEncoded(smallIcon(false), 'after-limit.ico', '')
+      const acceptedCUR = await acceptEncoded(smallIcon(true), 'after-limit.cur', '')
       state.phase = 'valid small JPEG from the same generator'
       const acceptedJPEG = await chooseEncodedImage(page, budgetJPEG(4, 2), 'after-limit.jpg', 'image/jpeg')
       await smallImage(page)
@@ -1080,13 +1127,17 @@ try {
       assert.ok(!text.includes('or less.') && !text.includes('or fewer.'))
       await page.click('dialog[open] button[title="Close"]'); await page.waitForFunction(() => !document.querySelector('dialog[open]'))
       await badge(page, 0)
-      results.push({case: name, actualFileInputSelections: 7, byteLimitFile: sourceFile,
+      results.push({case: name, actualFileInputSelections: 13, byteLimitFile: sourceFile,
         actualByteLimitErrorBeforeURLRequest: true, actualOversizedRasterFile: rasterFile,
         actualRasterFixtureDimensions: [width, height], actualPNGHeaderErrorBeforeURLRequest: true,
         actualGIFScreenFile: gifFile, actualGIFScreenDimensions: [width, height],
         actualGIFHeaderErrorBeforeURLRequest: true, actualJPEGFile: jpegFile, actualJPEGFrameDimensions: [width, height],
         actualJPEGHeaderErrorBeforeURLRequest: true, actualWebPFile: webpFileResult, actualWebPCanvasDimensions: [width, height],
         actualWebPHeaderErrorBeforeURLRequest: true, actualSmallJPEGRecovery: acceptedJPEG, actualSmallPNGRecovery: accepted,
+        actualBMPFile: bmpFile, actualBMPDimensions: [width, height], actualBMPHeaderErrorBeforeURLRequest: true,
+        actualAVIFFile: avifFile, actualAVIFPrimaryDimensions: [4002, 4000], actualAVIFHeaderErrorBeforeURLRequest: true,
+        actualSmallBMPRecovery: acceptedBMP, actualSmallAVIFRecovery: acceptedAVIF,
+        actualSmallICORecovery: acceptedICO, actualSmallCURRecovery: acceptedCUR,
         actualDisplayedPixelsAfterRecovery: 8, actualDraftPixels: 0, pass: true})
     } else {
       await waitStats(page, 5, 6); await quiet(page); await changeNode(page, '')

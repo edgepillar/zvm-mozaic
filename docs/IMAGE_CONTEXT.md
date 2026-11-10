@@ -116,8 +116,23 @@ through the native path. WebP checks the first VP8, VP8L or VP8X chunk within th
 33-byte probe after verifying the RIFF size envelope. VP8 and VP8L supply coded
 dimensions and VP8X supplies the canvas size.
 
-The Chrome case exercises source-byte, PNG, GIF, JPEG and WebP size errors
-and subsequent valid JPEG and PNG selections. Its PNG uses one-bit rows and the GIF stores a one-pixel
+BMP checks its file and DIB headers, including the signed height of Windows
+bitmaps. The common probe reads 33 bytes. Windows BMP uses one extra byte to
+complete the compression field. Embedded JPEG and PNG, unsupported DIB
+layouts and inconclusive headers continue through the native path.
+
+Still AVIF with the `avif` major brand uses at most 64 KiB of header data.
+The probe checks the container boundaries and follows the primary item and
+its property associations to the spatial extent. This also covers grid
+outputs whose individual tiles have different dimensions from the canvas.
+Sequences, ambiguous extents, cropping, unhandled properties and metadata
+beyond the probe continue through the native path. ICO and CUR keep the
+native path. Their directory entries describe images up to 256 pixels per
+edge, below the bitmap budget.
+
+The Chrome case exercises source-byte, PNG, GIF, JPEG, WebP, BMP and AVIF
+size errors, then opens valid BMP, AVIF, ICO, CUR, JPEG and PNG previews.
+The two AVIF fixtures are solid-color images generated with ImageIO. Its PNG uses one-bit rows and the GIF stores a one-pixel
 frame in the oversized logical screen. Both fixtures keep their encoded size
 small. Other format headers and native decoder peak memory remain separate
 qualification work.
@@ -153,7 +168,7 @@ dialog in one page task through
 Every independent scenario is attempted before the verdict, with source,
 browser/platform and delivered production-file digests retained.
 
-Current-source hosted CI checks 224 module/script controls,
+Current-source hosted CI checks 231 module/script controls,
 35 Chrome scenarios against the production bundle, all 35 original isolated contract events, fresh
 contract/ABI drift checks, TypeScript and production build. Wider format/size,
 browser/platform, concurrent modal/tab/crash, real wallet/provider/NoM and

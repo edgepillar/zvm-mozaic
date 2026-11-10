@@ -72,6 +72,70 @@ function webpPrefix(kind, width, height) {
   return webpFile([webpChunk('VP8 ', frame)])
 }
 
+// The zero-filled payload is a valid one-bit BMP with two palette entries.
+function budgetBMP(width, height, {dib = 40, depth = 1, compression = 0} = {}) {
+  const core = dib === 12
+  const pixels = 14 + dib + (core ? 6 : 8)
+  const body = compression === 0 ? Math.ceil(width * depth / 32) * 4 * Math.abs(height) : 2
+  const total = pixels + body
+  const header = Buffer.alloc(pixels)
+  header.write('BM'); header.writeUInt32LE(total, 2); header.writeUInt32LE(pixels, 10); header.writeUInt32LE(dib, 14)
+  if (core) {
+    header.writeUInt16LE(width, 18); header.writeUInt16LE(height, 20)
+    header.writeUInt16LE(1, 22); header.writeUInt16LE(depth, 24)
+  } else {
+    header.writeInt32LE(width, 18); header.writeInt32LE(height, 22)
+    header.writeUInt16LE(1, 26); header.writeUInt16LE(depth, 28)
+    header.writeUInt32LE(compression, 30); header.writeUInt32LE(body, 34)
+  }
+  return {header, total}
+}
+
+function avifBox(type, ...parts) {
+  const data = Buffer.concat(parts), header = Buffer.alloc(8)
+  header.writeUInt32BE(data.length + 8); header.write(type, 4, 'ascii')
+  return Buffer.concat([header, data])
+}
+
+function avifWords(...words) {
+  const data = Buffer.alloc(4 * words.length)
+  words.forEach((word, index) => data.writeUInt32BE(word, 4 * index))
+  return data
+}
+
+function avifHeaders(width, height, {wide = false, crop = false, sequence = false, duplicate = false,
+  brokenIndex = false, trailingBox = false, track = false, duplicateMeta = false} = {}) {
+  const primary = wide ? 0x10003 : 3
+  const ftyp = avifBox('ftyp', Buffer.from(sequence ? 'avif\0\0\0\0avis' : 'avif\0\0\0\0mif1'))
+  const pitm = avifBox('pitm', wide ? avifWords(0x01000000, primary) : Buffer.from([0, 0, 0, 0, 0, primary]))
+  const ispe = (w, h) => avifBox('ispe', avifWords(0, w, h))
+  const properties = [ispe(8192, 8192), ispe(width, height), ispe(1, 1)]
+  if (wide) properties.push(...Array.from({length: 129}, () => avifBox('free')), ispe(width, height))
+  if (crop) properties.push(avifBox('clap', Buffer.alloc(32)))
+  const association = (id, indexes) => {
+    const fields = Buffer.alloc(wide ? 5 + 2 * indexes.length : 3 + indexes.length)
+    if (wide) fields.writeUInt32BE(id); else fields.writeUInt16BE(id)
+    fields[wide ? 4 : 2] = indexes.length
+    indexes.forEach((index, offset) => {
+      if (wide) fields.writeUInt16BE(0x8000 | index, 5 + 2 * offset)
+      else fields[3 + offset] = 0x80 | index
+    })
+    return fields
+  }
+  const indexes = [brokenIndex ? 90 : wide ? 133 : 2]
+  if (crop) indexes.push(properties.length)
+  if (duplicate) indexes.push(3)
+  const ipma = avifBox('ipma', avifWords(wide ? 0x01000001 : 0, 2), association(1, [1]), association(primary, indexes))
+  const meta = avifBox('meta', avifWords(0), pitm, avifBox('iprp', avifBox('ipco', ...properties), ipma))
+  const trailing = trailingBox ? [avifBox('free', Buffer.alloc(65536)), avifBox('mdat')] : []
+  return Buffer.concat([ftyp, meta, ...(duplicateMeta ? [meta] : []), ...(track ? [avifBox('moov')] : []), ...trailing])
+}
+
+function budgetBMPFile(width, height, options) {
+  const {header, total} = budgetBMP(width, height, options)
+  return Buffer.concat([header, Buffer.alloc(total - header.length)])
+}
+
 if(process.env.MOZAIC_IMPORT_BATCH_ORIGINAL==='1') {
   test('original synchronous import action opens a picker during a parent file-drop update',async()=>{
     const f=await dialogFixture();f.setBatch(file('drop.svg'))
@@ -460,5 +524,81 @@ if(process.env.MOZAIC_IMPORT_BATCH_ORIGINAL==='1') {
       assert.equal(value.source, bitmap)
       f.module.disposeDecoded(value); assert.equal(bitmap.closed, 1)
     }
+  })
+  test('image rejects oversized BMP core and Windows bitmaps before native decoding', async () => {
+    const variants = [
+      [4000, {dib: 12}], [4000, {}], [-4000, {}], [4000, {dib: 124}], [4000, {compression: 1, depth: 8}],
+    ]
+    for (const [height, options] of variants) {
+      const f = await imageFixture(), file = fileWithHeader(budgetBMPFile(4001, height, options), 'large.bmp', '')
+      await assert.rejects(f.module.decode(file), {message: 'Choose a raster image with 16 million pixels or fewer.'})
+      assert.deepEqual(file.reads, options.dib === 12 ? [[0, 33]] : [[0, 33], [33, 34]])
+      assert.deepEqual([f.urls.size, f.images.length, f.bitmaps.length], [0, 0, 0])
+    }
+  })
+  test('image admits a BMP at the exact pixel limit', async () => {
+    const f = await imageFixture(), file = fileWithHeader(budgetBMPFile(4000, -4000), 'edge.bmp', 'image/bmp')
+    const pending = f.module.decode(file)
+    await f.flush(); f.ready(undefined, 4000, 4000); await f.flush()
+    const bitmap = f.bitmap(), value = await pending
+    assert.equal(value.source, bitmap); assert.deepEqual(file.reads, [[0, 33], [33, 34]])
+    f.module.disposeDecoded(value); assert.equal(bitmap.closed, 1)
+  })
+  test('image leaves inconclusive BMP headers to native decoding', async () => {
+    const short = budgetBMPFile(4001, 4000).subarray(0, 62); short.writeUInt32LE(short.length, 2)
+    const planes = budgetBMPFile(4001, 4000, {depth: 8, compression: 1}); planes.writeUInt16LE(2, 26)
+    const offset = budgetBMPFile(4001, 4000, {depth: 8, compression: 1}); offset.writeUInt32LE(10, 10)
+    const embedded = budgetBMPFile(4001, 4000, {depth: 0, compression: 5})
+    const topRLE = budgetBMPFile(4001, -4000, {depth: 8, compression: 1})
+    for (const bytes of [short, planes, offset, embedded, topRLE, planes.subarray(0, 33)]) {
+      const f = await imageFixture(), pending = f.module.decode(fileWithHeader(bytes, 'fallback.bmp', 'image/bmp'))
+      await f.flush(); f.ready(undefined, 8, 4); await f.flush()
+      const bitmap = f.bitmap(), value = await pending
+      assert.equal(value.source, bitmap); f.module.disposeDecoded(value); assert.equal(bitmap.closed, 1)
+    }
+  })
+  test('image rejects the associated AVIF primary extent before native decoding', async () => {
+    for (const wide of [false, true]) {
+      const f = await imageFixture(), file = fileWithHeader(avifHeaders(4001, 4000, {wide}), 'large.avif', '')
+      await assert.rejects(f.module.decode(file), {message: 'Choose a raster image with 16 million pixels or fewer.'})
+      assert.deepEqual(file.reads, [[0, 33], [33, 65536]])
+      assert.deepEqual([f.urls.size, f.images.length, f.bitmaps.length], [0, 0, 0])
+    }
+  })
+  test('image ignores large AVIF properties that are unrelated to the primary item', async () => {
+    const f = await imageFixture(), file = fileWithHeader(avifHeaders(4000, 4000), 'edge.avif', 'image/avif')
+    const pending = f.module.decode(file)
+    await f.flush(); f.ready(undefined, 4000, 4000); await f.flush()
+    const bitmap = f.bitmap(), value = await pending
+    assert.equal(value.source, bitmap); assert.deepEqual(file.reads, [[0, 33], [33, 65536]])
+    f.module.disposeDecoded(value); assert.equal(bitmap.closed, 1)
+  })
+  test('image leaves ambiguous and out-of-prefix AVIF dimensions to native decoding', async () => {
+    const variants = [{crop: true}, {sequence: true}, {track: true}, {duplicate: true}, {duplicateMeta: true},
+      {brokenIndex: true}, {trailingBox: true}].map(options => avifHeaders(4001, 4000, options))
+    variants.push(avifHeaders(4001, 4000).subarray(0, -1))
+    for (const bytes of variants) {
+      const f = await imageFixture(), file = fileWithHeader(bytes, 'fallback.avif', 'image/avif')
+      const pending = f.module.decode(file)
+      await f.flush(); f.ready(undefined, 8, 4); await f.flush()
+      const bitmap = f.bitmap(), value = await pending
+      assert.equal(value.source, bitmap); f.module.disposeDecoded(value); assert.equal(bitmap.closed, 1)
+      assert.deepEqual(file.reads, [[0, 33], [33, 65536]])
+    }
+  })
+  test('image aborts the extended AVIF prefix read before creating a URL', async () => {
+    const f = await imageFixture(), file = fileWithHeader(avifHeaders(4001, 4000), 'cancel.avif', 'image/avif')
+    const controller = new AbortController(), slice = file.slice.bind(file)
+    let settle
+    file.slice = (start, end) => {
+      const result = slice(start, end)
+      return start === 33 ? {arrayBuffer: () => new Promise(resolve => {settle = resolve})} : result
+    }
+    const pending = f.module.decode(file, controller.signal)
+    const rejection = assert.rejects(pending, {name: 'AbortError'})
+    await f.flush(); assert.equal(typeof settle, 'function')
+    controller.abort(); await rejection; settle(new ArrayBuffer(0)); await f.flush()
+    assert.deepEqual(file.reads, [[0, 33], [33, 65536]])
+    assert.deepEqual([f.urls.size, f.images.length, f.bitmaps.length], [0, 0, 0])
   })
 }
