@@ -244,7 +244,8 @@ What it adds over Satoshi's Place, which had one pencil and sixteen colours:
   left-right, top-bottom, or both.
 - **Images:** stamp an image into the draft, or pin it as a see-through
   guide to trace. Its scaled width and height fit within the board. Choose a
-  file, drop it on the canvas, or paste it with Ctrl+V.
+  file, drop it on the canvas, or paste it with Ctrl+V. Imports accept files
+  up to 32 MiB and raster bitmaps up to 16 million pixels.
 - **A free draft** up to the whole canvas, with undo and redo, kept across
   reloads. It shows the cost live, and drafted pixels that already match the
   canvas are free. More than one transaction is painted through a **paint

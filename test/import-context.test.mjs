@@ -205,4 +205,48 @@ if(process.env.MOZAIC_IMPORT_BATCH_ORIGINAL==='1') {
     complete('<svg viewBox="0 0 8 4"/>'); await f.flush()
     assert.equal(f.urls.size, 0); assert.equal(f.revoked.length, 1)
   })
+  test('image rejects oversized files before text reads and URL creation', async () => {
+    for (const [type, name] of [['', 'source.svg'], ['image/png', 'source.png']]) {
+      const f = await imageFixture()
+      let reads = 0
+      const file = {type, name, size: 32 * 1024 * 1024 + 1, async text() { reads++; return '<svg/>' }}
+      await assert.rejects(f.module.decode(file), {message: 'Choose an image of 32 MiB or less.'})
+      assert.deepEqual([reads, f.urls.size, f.revoked.length, f.images.length, f.bitmaps.length], [0, 0, 0, 0, 0])
+    }
+  })
+  test('image accepts the exact source and bitmap limits', async () => {
+    const f = await imageFixture()
+    const pending = f.module.decode({name: 'limit.png', type: 'image/png', size: 32 * 1024 * 1024})
+    await f.flush(); f.ready(undefined, 4000, 4000); await f.flush()
+    const bitmap = f.bitmap(), value = await pending
+    assert.equal(value.source, bitmap)
+    assert.deepEqual([value.width, value.height, bitmap.width, bitmap.height], [4000, 4000, 4000, 4000])
+    assert.equal(f.urls.size, 0); assert.equal(bitmap.closed, 0)
+    f.module.disposeDecoded(value); f.module.disposeDecoded(value)
+    assert.equal(bitmap.closed, 1)
+  })
+  test('image rejects oversized natural raster dimensions before copying', async () => {
+    const f = await imageFixture(), pending = f.module.decode(png())
+    const rejected = assert.rejects(pending, {message: 'Choose a raster image with 16 million pixels or fewer.'})
+    await f.flush(); f.ready(undefined, 4001, 4000); await rejected
+    assert.deepEqual([f.bitmaps.length, f.urls.size, f.revoked.length], [0, 0, 1])
+  })
+  test('image closes a returned bitmap above the pixel limit', async () => {
+    const f = await imageFixture(), pending = f.module.decode(png())
+    const rejected = assert.rejects(pending, {message: 'Choose a raster image with 16 million pixels or fewer.'})
+    await f.flush(); f.ready(undefined, 8, 4); await f.flush()
+    const {result} = f.bitmaps[0]
+    result.width = 4001; result.height = 4000
+    f.bitmap(); await rejected
+    assert.deepEqual([result.closed, f.urls.size, f.revoked.length], [1, 0, 1])
+  })
+  test('image keeps vector sizing independent from the bitmap limit', async () => {
+    const f = await imageFixture(), pending = f.module.decode(svg('image/svg+xml'))
+    await f.flush(); f.ready(undefined, 4001, 4000)
+    const value = await pending
+    assert.deepEqual([value.vector, value.width, value.height, f.bitmaps.length], [true, 4001, 4000, 0])
+    assert.equal(f.urls.size, 1)
+    f.module.disposeDecoded(value)
+    assert.equal(f.urls.size, 0)
+  })
 }

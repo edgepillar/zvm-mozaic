@@ -89,6 +89,23 @@ constructed ClipboardEvent with a controlled SVG and other items through the
 actual paste handler. It checks the preview, file chooser and URL disposal.
 The event carries its own test data and leaves the system clipboard untouched.
 
+## Source and bitmap budgets
+
+Imports accept source files up to 32 MiB. The byte check runs before SVG text
+reads, object URL creation and native decoding. Raster images also have a
+16-million-pixel budget, sixteen times the area of the standard board. The
+application checks the dimensions reported by the decoded image before making
+its bitmap copy and checks the returned bitmap before retaining it. Either
+failure releases owned resources and presents a size message in the dialog.
+SVGs use the file budget and the scaled canvas limit. They retain a vector
+source for scaling.
+
+The browser performs its initial native decode before the raster dimension
+check. This bounds the application's bitmap retention, while native decode
+cost and browser-specific peak memory need separate qualification. The Chrome
+case exercises both errors and a subsequent valid file selection. Its large
+dimension PNG uses one-bit rows to keep the encoded fixture small.
+
 ## Evidence boundaries
 
 The memory controls execute the actual ImportDialog SFC script with an explicit
@@ -120,8 +137,8 @@ dialog in one page task through
 Every independent scenario is attempted before the verdict, with source,
 browser/platform and delivered production-file digests retained.
 
-Current-source hosted CI checks 206 module/script controls,
-34 Chrome scenarios against the production bundle, all 35 original isolated contract events, fresh
+Current-source hosted CI checks 211 module/script controls,
+35 Chrome scenarios against the production bundle, all 35 original isolated contract events, fresh
 contract/ABI drift checks, TypeScript and production build. Wider format/size,
 browser/platform, concurrent modal/tab/crash, real wallet/provider/NoM and
 maintainer/operator/release requirements remain open. All original roadmap

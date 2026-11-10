@@ -130,7 +130,7 @@ export async function imageFixture({BlobPort = Blob} = {}) {
     createObjectURL(blob){const url='blob:memory-'+(++next);urls.set(url,blob);return url},
     revokeObjectURL(url){revoked.push(url);urls.delete(url)}},
     setTimeout(fn,delay){timers.push({fn,delay});return timers.length},
-    createImageBitmap(image){const d=deferred(),result={image,closed:0,close(){this.closed++}};bitmaps.push({image,result,...d});return d.promise},
+    createImageBitmap(image){const d=deferred(),result={image,width:image.naturalWidth,height:image.naturalHeight,closed:0,close(){this.closed++}};bitmaps.push({image,result,...d});return d.promise},
     document:{createElement(name){if(name!=='canvas')throw new Error('Undeclared image element');return {width:0,height:0,getContext(){return {drawImage(){},getImageData(){return {data:new Uint8ClampedArray([1,2,3,255])}}}}}}}}
   const source=readFileSync(new URL('../src/core/image.ts',import.meta.url),'utf8')
   const namespace=await moduleWithPorts(source,{vue:v.vue},globals,'actual-image-module')

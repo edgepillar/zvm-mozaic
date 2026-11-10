@@ -41,6 +41,13 @@ export interface Decoded {
  */
 const IMAGE_EXT = /\.(png|apng|jpe?g|jfif|pjpeg|pjp|gif|webp|avif|bmp|ico|cur|svg)$/i
 
+const MAX_IMAGE_BYTES = 32 * 1024 * 1024
+const MAX_BITMAP_PIXELS = 16_000_000
+
+function checkBitmapSize(width: number, height: number) {
+  if (width * height > MAX_BITMAP_PIXELS) throw new Error('Choose a raster image with 16 million pixels or fewer.')
+}
+
 /** Whether a file looks like an image the browser can read, by type or by name. */
 export function isImage(f: {type: string; name?: string}): boolean {
   return f.type.startsWith('image/') || IMAGE_EXT.test(f.name ?? '')
@@ -91,6 +98,7 @@ export async function decode(file: File | Blob, signal?: AbortSignal): Promise<D
   check()
   const name = (file as File).name ?? ''
   if (!isImage({type: file.type, name})) throw new Error('That is not an image.')
+  if (file.size > MAX_IMAGE_BYTES) throw new Error('Choose an image of 32 MiB or less.')
   const svg = file.type === 'image/svg+xml' || /\.svg$/i.test(name)
   const blob = svg && file.type !== 'image/svg+xml'
     ? new Blob([await imageRead(file.text(), signal)], {type: 'image/svg+xml'}) : file
@@ -146,6 +154,7 @@ export async function decode(file: File | Blob, signal?: AbortSignal): Promise<D
     if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) throw new Error('That image has no size to read.')
     check()
     if (svg) return keep(img, width, height)
+    checkBitmapSize(width, height)
     // A bitmap allocation can finish after its caller has already cancelled.
     const pending = createImageBitmap(img).then(value => {
       if (released || signal?.aborted) {value.close(); throw cancelledImage()}
@@ -153,6 +162,7 @@ export async function decode(file: File | Blob, signal?: AbortSignal): Promise<D
     })
     bitmap = await imageRead(pending, signal)
     check()
+    checkBitmapSize(bitmap.width, bitmap.height)
     releaseURL()
     return keep(bitmap, width, height)
   } finally {

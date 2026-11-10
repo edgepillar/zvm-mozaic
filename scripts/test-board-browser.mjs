@@ -6,6 +6,7 @@ import {readFile, stat} from 'node:fs/promises'
 import {existsSync, readFileSync} from 'node:fs'
 import {resolve, extname} from 'node:path'
 import {createHash} from 'node:crypto'
+import {crc32, deflateSync} from 'node:zlib'
 import {execFileSync} from 'node:child_process'
 import {stripTypeScriptTypes} from 'node:module'
 import puppeteer from 'puppeteer-core'
@@ -29,7 +30,7 @@ const routerPaint = {address: R, blockNumber: '0x9', transactionHash: TX, transa
   topics: [topic('PaintedBy(address,address,uint256)'), addressTopic(ARTIST), addressTopic(ARTIST)], data: encodeAbiParameters([{type: 'uint256'}], [1n])}
 const DETAIL_CASES = ['late-history-details','late-router-details','live-details','history-unavailable-details','unavailable-details']
 const GESTURE_CASES = ["pointer-cancel", "held-pointer-context", "pinch-spray", "deferred-route", "view-dimensions"]
-const IMAGE_CASES = ['image-stamp', 'image-close', 'image-replace-guide', 'image-close-pending', 'image-drop', 'image-alpha-count', 'image-stamp-overlap', 'image-tall-preview', 'image-paste-svg']
+const IMAGE_CASES = ['image-stamp', 'image-close', 'image-replace-guide', 'image-close-pending', 'image-drop', 'image-alpha-count', 'image-stamp-overlap', 'image-tall-preview', 'image-paste-svg', 'image-source-budget']
 const MODAL_CASES = ['image-queued-close', 'image-native-escape', 'node-modal-queued-close']
 function detailPaint({block = 9, painter = ARTIST, transaction = TX, rgb = 0x112233} = {}) {
   const packed = '0x' + DETAIL_INDEX.toString(16).padStart(6, '0') + rgb.toString(16).padStart(6, '0')
@@ -326,6 +327,21 @@ async function chooseImage(page, {name = 'picture.svg', colour = '#ff0000', png 
   assert.ok(actual.bytes > 0 && actual.bytes <= 1024)
   return actual
 }
+// A one-bit PNG exercises native dimensions with a small encoded fixture.
+function budgetPNG(width, height) {
+  const header = Buffer.alloc(13)
+  header.writeUInt32BE(width, 0); header.writeUInt32BE(height, 4); header[8] = 1
+  const chunk = (type, data) => {
+    const bytes = Buffer.alloc(data.length + 12)
+    bytes.writeUInt32BE(data.length, 0); bytes.write(type, 4, 'ascii'); data.copy(bytes, 8)
+    bytes.writeUInt32BE(crc32(bytes.subarray(4, -4)), bytes.length - 4)
+    return bytes
+  }
+  const rows = Buffer.alloc((Math.ceil(width / 8) + 1) * height)
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', header),
+    chunk('IDAT', deflateSync(rows)), chunk('IEND', Buffer.alloc(0))])
+}
+
 async function smallImage(page) {
   await page.waitForSelector('dialog[open] [data-testid="as-stamp"]', {visible: true})
   await page.focus('[data-testid="image-width"]'); await page.keyboard.press('Home')
@@ -398,7 +414,7 @@ async function failureDetail(error, state, page) {
 try {
   browser = await puppeteer.launch({executablePath, headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking', '--no-first-run']})
   const browserVersion = await browser.version()
-  for (const name of ['old-head', 'old-totals', 'late-router', 'unavailable', 'old-chunk', 'old-history', 'old-log-error', 'canvas-switch', 'draft-context', 'draft-fast-return', 'draft-storage-reload', 'legacy-storage-migration', 'late-history-details', 'late-router-details', 'live-details', 'history-unavailable-details', 'unavailable-details', 'pointer-cancel', 'held-pointer-context', 'pinch-spray', 'deferred-route', 'view-dimensions', 'image-stamp', 'image-close', 'image-replace-guide', 'image-close-pending', 'image-drop', 'image-queued-close', 'image-native-escape', 'node-modal-queued-close', 'image-alpha-count', 'image-stamp-overlap', 'image-tall-preview', 'image-paste-svg']) {
+  for (const name of ['old-head', 'old-totals', 'late-router', 'unavailable', 'old-chunk', 'old-history', 'old-log-error', 'canvas-switch', 'draft-context', 'draft-fast-return', 'draft-storage-reload', 'legacy-storage-migration', 'late-history-details', 'late-router-details', 'live-details', 'history-unavailable-details', 'unavailable-details', 'pointer-cancel', 'held-pointer-context', 'pinch-spray', 'deferred-route', 'view-dimensions', 'image-stamp', 'image-close', 'image-replace-guide', 'image-close-pending', 'image-drop', 'image-queued-close', 'image-native-escape', 'node-modal-queued-close', 'image-alpha-count', 'image-stamp-overlap', 'image-tall-preview', 'image-paste-svg', 'image-source-budget']) {
     active = {name, held: new Map(), calls: [], contractCalls: []}; const state = active
     console.log('MOZAIC-BOARD-BROWSER-START ' + JSON.stringify({case: name, source}))
     const context = await browser.createBrowserContext(), page = await context.newPage()
@@ -907,6 +923,50 @@ try {
         systemClipboardAccessed: false, actualPasteImportRendered: true, actualUnwantedNativeFileChoosers: 0,
         actualFileChooserObservationWindowMs: 1500, actualDisplayedPixels: 8, actualPreviewRGBA: rgba,
         actualSourceURLReleasedOnClose: true, actualDraftPixels: 0, ...observed, pass: true})
+    } else if (name === 'image-source-budget') {
+      state.phase = 'source byte rejection before native decode'
+      const f = await imageReady(page)
+      const sourceFile = await page.evaluate(() => {
+        const chunk = new Blob([new Uint8Array(1024 * 1024)])
+        const file = new File([...Array(32).fill(chunk), new Uint8Array(1)], 'over-byte-limit.svg')
+        const input = document.querySelector('dialog[open] [data-testid="image-input"]')
+        const transfer = new DataTransfer(); transfer.items.add(file); input.files = transfer.files
+        input.dispatchEvent(new Event('change', {bubbles: true}))
+        return {name: file.name, type: file.type, bytes: file.size}
+      })
+      assert.equal(sourceFile.bytes, 32 * 1024 * 1024 + 1)
+      await page.waitForFunction(() => document.querySelector('dialog[open]')?.textContent.includes('Choose an image of 32 MiB or less.'))
+      await quietExceptHeld(page); assert.equal(f.urls.size, 0)
+      assert.equal(await page.$('dialog[open] [data-testid="as-stamp"]'), null)
+      state.phase = 'oversized native PNG dimensions and resource release'
+      const width = 4001, height = 4000, encoded = budgetPNG(width, height)
+      assert.ok(encoded.length > 0 && encoded.length <= 8192)
+      const rasterFile = await page.evaluate(encoded => {
+        const bytes = Uint8Array.from(atob(encoded), character => character.charCodeAt(0))
+        const file = new File([bytes], 'over-pixel-limit.png', {type: 'image/png'})
+        const input = document.querySelector('dialog[open] [data-testid="image-input"]')
+        const transfer = new DataTransfer(); transfer.items.add(file); input.files = transfer.files
+        input.dispatchEvent(new Event('change', {bubbles: true}))
+        return {name: file.name, type: file.type, bytes: file.size}
+      }, encoded.toString('base64'))
+      assert.equal(rasterFile.bytes, encoded.length)
+      await page.waitForFunction(() => document.querySelector('dialog[open]')?.textContent.includes('Choose a raster image with 16 million pixels or fewer.'))
+      assert.equal(await page.$('dialog[open] [data-testid="as-stamp"]'), null)
+      const failedURL = await onlyImageURL(f); assert.equal(await canReadImageURL(page, failedURL), false)
+      state.phase = 'small native PNG replaces the rejected selection'
+      const accepted = await chooseImage(page, {name: 'after-limit.png', png: true})
+      await smallImage(page)
+      await page.waitForFunction(() => Array.from(document.querySelectorAll('dialog[open] p'))
+        .some(node => node.textContent.trim().startsWith('8 pixels.')))
+      const text = await page.$eval('dialog[open]', node => node.textContent)
+      assert.ok(!text.includes('or less.') && !text.includes('or fewer.'))
+      await page.click('dialog[open] button[title="Close"]'); await page.waitForFunction(() => !document.querySelector('dialog[open]'))
+      await badge(page, 0)
+      results.push({case: name, actualFileInputSelections: 3, byteLimitFile: sourceFile,
+        actualByteLimitErrorBeforeURLRequest: true, actualOversizedRasterFile: rasterFile,
+        actualRasterFixtureDimensions: [width, height], actualNativeRasterLimitError: true,
+        actualRejectedRasterURLReleased: true, actualSmallPNGRecovery: accepted,
+        actualDisplayedPixelsAfterRecovery: 8, actualDraftPixels: 0, pass: true})
     } else {
       await waitStats(page, 5, 6); await quiet(page); await changeNode(page, '')
       await page.waitForFunction(() => {const rows = Array.from(document.querySelectorAll('.stats-body b'), node => node.textContent.trim()); return rows[0] === '-' && rows[2] === '-'})
@@ -929,14 +989,14 @@ try {
       await context.close()
     }
   }
-  console.log('MOZAIC-BOARD-BROWSER-AGGREGATE ' + JSON.stringify({source, attempted: 34, passed: results.length, failures}))
+  console.log('MOZAIC-BOARD-BROWSER-AGGREGATE ' + JSON.stringify({source, attempted: 35, passed: results.length, failures}))
   assert.deepEqual(failures, [], 'All independent production scenarios must pass')
-  assert.equal(results.length, 34); assert.deepEqual(errors, []); assert.deepEqual(unexpected, [])
+  assert.equal(results.length, 35); assert.deepEqual(errors, []); assert.deepEqual(unexpected, [])
   assert.ok(delivered.has('index.html') && Array.from(delivered.keys()).some(name => name.endsWith('.js')))
-  console.log('MOZAIC-BOARD-BROWSER-SUMMARY ' + JSON.stringify({schema: 1, source, cases: 34, passed: 34, failed: 0,
+  console.log('MOZAIC-BOARD-BROWSER-SUMMARY ' + JSON.stringify({schema: 1, source, cases: 35, passed: 35, failed: 0,
     browserVersion, nodeVersion: process.version, platform: process.platform, architecture: process.arch,
     actualProductPageVisibility: 'visible', independentScenarioFailuresCollectedBeforeFinalVerdict: true,
-    actualProductionEntryRoutes: ['canvas', 'gallery'], actualDraftPixelsPreserved: 1, actualIndexedDBAndLegacyStorage: true, nativeStorageLockCases: 3, actualDraftReloadCases: 1, actualPixelDetailCases: 5, stationaryPointerDetailCases: 2, actualGestureAndNavigationCases: 5, actualTouchInputCases: 3, actualRouteTimerBoundaryCases: 1, actualSmallCanvasCases: 1, actualImageImportCases: 11, actualBrowserClipboardEventCases: 1, actualNativePictureSizeCases: 1, actualNativeAlphaCountCases: 1, actualNativeStampOverlapCases: 1, actualNativeFileDropCases: 3, actualNativeModalCases: 3, actualQueuedModalCloseCases: 2, actualNativeEscapeCases: 2, actualNativePNGPlacementCases: 3, actualNativeSVGResourceCases: 5, actualExplicitObjectURLLifetimeCases: 6, actualPendingImportCloseCases: 1,
+    actualProductionEntryRoutes: ['canvas', 'gallery'], actualDraftPixelsPreserved: 1, actualIndexedDBAndLegacyStorage: true, nativeStorageLockCases: 3, actualDraftReloadCases: 1, actualPixelDetailCases: 5, stationaryPointerDetailCases: 2, actualGestureAndNavigationCases: 5, actualTouchInputCases: 3, actualRouteTimerBoundaryCases: 1, actualSmallCanvasCases: 1, actualImageImportCases: 12, actualImageBudgetCases: 1, actualBrowserClipboardEventCases: 1, actualNativePictureSizeCases: 1, actualNativeAlphaCountCases: 1, actualNativeStampOverlapCases: 1, actualNativeFileDropCases: 3, actualNativeModalCases: 3, actualQueuedModalCloseCases: 2, actualNativeEscapeCases: 2, actualNativePNGPlacementCases: 3, actualNativeSVGResourceCases: 5, actualExplicitObjectURLLifetimeCases: 6, actualPendingImportCloseCases: 1,
     servedBuildFiles: Object.fromEntries(Array.from(delivered).sort()), unexpectedExternalRequests: 0, pageOrFixtureErrors: 0,
     walletProvidersConnected: 0, publicNetworkOrRealNoMExecution: false, sourceTestHooksOrProductModuleReplacements: 0}))
 } catch (error) {
